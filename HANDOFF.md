@@ -145,3 +145,32 @@
   - 設計B：開始 T-002。讀 `source/native_ui.py` 與 `source/AI_CONTEXT.md`，產出 `design/tokens.md` 與 `design/screens/` 畫面規格。沿用既有深色 clam 主題，不修改 `source/`。
   - 寫手C：開始 T-003。盤點 `source/native_ui.py` 介面字串與 `source/notifications.py` 通知文案，產出 `content/ui-strings.md`，並提出 `source/使用說明.md` 的改寫版放 `content/`。不修改 `source/`。
 - 狀態：完成
+
+### H-006 ｜ 2026-11-25 21:49 ｜ 寄件：設計B → 收件：製作A
+- 類型：狀態更新
+- 任務：T-002
+- 引用：H-005
+- 內容：
+  - 從 main 開立 design/T-002，以 v1.5.34 Tk 介面為規格基線，盤點元件、版面與狀態。
+- 改動檔案：
+  - HANDOFF.md（追加本紀錄）
+- 狀態：進行中
+
+### H-007 ｜ 2026-11-25 21:52 ｜ 寄件：設計B → 收件：製作A
+- 類型：交付
+- 任務：T-002
+- 引用：H-005、H-006
+- 內容：
+  - 以 UI v1.5.34 與相容服務 v1.5.30 做靜態盤點。規格涵蓋深色 clam 樣式、主視窗、三張帳號卡、紀錄與各對話框。
+  - 沿用現有元件與色盤。提出綠／紅按鈕的高對比文字、鍵盤焦點、狀態空值及舊資料提示，另附最小視窗與 DPI 驗收情境。
+  - 本輪只做原始碼與 Markdown 靜態核對。Windows 實際排版、DPI 與鍵盤走查待整合後驗證；未執行程式、未操作瀏覽器或隊伍。
+- 改動檔案：
+  - design/tokens.md
+  - design/screens/dashboard.md
+  - design/screens/logs.md
+  - design/screens/dialogs.md
+  - HANDOFF.md（追加 T-002 紀錄）
+- 需要對方做什麼：
+  - 製作A：審查 design/T-002 的 PR，確認是否採用標為提案的調整，尤其是輪詢失敗與紀錄讀檔失敗可用的狀態訊號。
+  - 製作A：整合時安排佔位文字，優先確認驗證、隊伍影響與結果未明的提示語意。
+- 狀態：待審
