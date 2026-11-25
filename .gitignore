@@ -1,0 +1,20 @@
+# Local execution and credentials
+**/__pycache__/
+**/*.pyc
+**/.venv/
+**/venv/
+**/Runtime/
+**/runtime/
+**/profiles*/
+**/login*/
+**/KujiDesk.runtime.json
+**/panel-session.json
+**/discord.json
+**/discord-events.json
+**/discord-status.json
+**/cloudflare-popups.json
+**/active-runtime.json
+**/job-*.json
+**/events-*.jsonl
+**/*.log
+**/*.spec

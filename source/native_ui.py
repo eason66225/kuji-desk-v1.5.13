@@ -14,8 +14,8 @@ from tkinter import messagebox, simpledialog, ttk
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-VERSION='1.5.20'
-UI_VERSION='1.5.20'
+VERSION='1.5.30'
+UI_VERSION='1.5.34'
 BG='#10151c'; PANEL='#18212c'; TEXT='#eef3f8'; MUTED='#a0aec0'; LIME='#d7f896'
 RED='#e05252'; GREEN='#38a169'
 COLORS={'A':'#8bb9ff','B':'#d7f896','C':'#ffbe84'}
@@ -117,6 +117,10 @@ class NativeUI:
         self.pool=ThreadPoolExecutor(max_workers=5);self.results=queue.Queue()
         self.service_version=None
         self.accounts={};self.cards={};self.busy=set();self.polling=False;self.closed=False
+        try:
+            self.cloudflare_popups=json.loads((self.runtime/'cloudflare-popups.json').read_text(encoding='utf-8'))
+        except (OSError,ValueError):
+            self.cloudflare_popups={}
         self.connection=tk.StringVar(value='正在連接本機服務…')
         self.notice=tk.StringVar(value='關閉此視窗不會自動退出網站隊伍。')
         self.url=tk.StringVar(value='https://on-line.1kuji.com/Form/Product/SelectBox.aspx?pid=sap_0000008694&pno=1')
@@ -246,9 +250,9 @@ class NativeUI:
             actions=tk.Frame(f,bg=PANEL);actions.pack(fill='x',pady=(10,0))
             actions.columnconfigure(0,weight=1);actions.columnconfigure(1,weight=1)
             buttons={}
-            for row,pair in enumerate([ [('open','開啟／登入'),('monitor','開始監看')],
+            for row,pair in enumerate([ [('open','連接 Chrome'),('monitor','開始監看')],
                                         [('requeue','離開目前箱並監看'),('inspect','重新查看／修復')],
-                                        [('restart','重啟此帳號視窗'),('rename','修改帳號名稱')],
+                                        [('restart','選擇 Chrome 設定檔'),('rename','修改帳號名稱')],
                                         ]):
                 for column,(action,text) in enumerate(pair):
                     b=self.button(actions,text,lambda i=ident,a=action:self.act(i,a),action=='monitor')
@@ -326,7 +330,7 @@ class NativeUI:
         self.discord_dialog = dialog
         dialog.title('Discord Webhook 通知設定')
         dialog.configure(bg=PANEL)
-        dialog.geometry('680x560')
+        dialog.geometry('680x640')
         dialog.resizable(False, False)
         dialog.transient(self.root)
 
@@ -339,6 +343,8 @@ class NativeUI:
         uncertain = tk.BooleanVar(value='uncertain' in config.get('events', ['ready', 'uncertain', 'sold_out']))
         sold_out = tk.BooleanVar(value='sold_out' in config.get('events', ['ready', 'uncertain', 'sold_out']))
         entry_passed = tk.BooleanVar(value='entry_passed' in config.get('events', ['ready', 'uncertain', 'sold_out', 'entry_passed']))
+        cloudflare = tk.BooleanVar(value=config.get('cloudflare_enabled', True))
+        cloudflare_popup = tk.BooleanVar(value=config.get('cloudflare_popup', False))
         ahead_enabled = tk.BooleanVar(value=config.get('ahead_threshold') is not None)
         ahead_count = tk.StringVar(value=str(config.get('ahead_threshold') if config.get('ahead_threshold') is not None else 5))
         repeat = tk.BooleanVar(value=config.get('repeat_enabled', False))
@@ -375,6 +381,10 @@ class NativeUI:
                        activebackground=PANEL, activeforeground=TEXT, font=('Microsoft JhengHei UI', 10)).pack(anchor='w', pady=2)
         tk.Checkbutton(events_frame, text='排隊異常、需要確認時通知', variable=uncertain, bg=PANEL, fg=TEXT, selectcolor=BG,
                        activebackground=PANEL, activeforeground=TEXT, font=('Microsoft JhengHei UI', 10)).pack(anchor='w', pady=2)
+        tk.Checkbutton(events_frame, text='出現 Cloudflare 真人驗證時發送 DC 通知（同次只通知一次）', variable=cloudflare, bg=PANEL, fg=TEXT, selectcolor=BG,
+                       activebackground=PANEL, activeforeground=TEXT, font=('Microsoft JhengHei UI', 10)).pack(anchor='w', pady=2)
+        tk.Checkbutton(events_frame, text='出現 Cloudflare 驗證時彈出提示視窗（需開著總控視窗）', variable=cloudflare_popup, bg=PANEL, fg=TEXT, selectcolor=BG,
+                       activebackground=PANEL, activeforeground=TEXT, font=('Microsoft JhengHei UI', 10)).pack(anchor='w', pady=2)
 
         ahead_row = tk.Frame(events_frame, bg=PANEL)
         ahead_row.pack(fill='x', pady=2)
@@ -409,9 +419,11 @@ class NativeUI:
                 raise ValueError('等待人數需為 0～100000。')
             if not 10 <= seconds <= 86400:
                 raise ValueError('重複間隔需為 10～86400 秒。')
-            if enabled.get() and not events and threshold is None:
+            if enabled.get() and not events and not cloudflare.get() and threshold is None:
                 raise ValueError('請至少選擇一種通知事件。')
             return {'enabled': enabled.get(), 'webhook_url': url, 'events': events,
+                    'cloudflare_enabled': cloudflare.get(),
+                    'cloudflare_popup': cloudflare_popup.get(),
                     'ahead_threshold': threshold, 'repeat_enabled': repeat.get(), 'repeat_seconds': seconds}
 
         def save():
@@ -493,6 +505,38 @@ class NativeUI:
         self.submit('poll',lambda:self.client.call(timeout=3))
         self.root.after(1000,self.poll)
 
+    def show_cloudflare_alerts(self):
+        from notifications import cloudflare_event_key, save_json
+        try:
+            config=json.loads((self.runtime/'discord.json').read_text(encoding='utf-8'))
+        except (OSError,ValueError):
+            return
+        if not config.get('cloudflare_popup', False):
+            return
+        labels=[]
+        for account in self.accounts.values():
+            key=cloudflare_event_key(account)
+            if key and key not in self.cloudflare_popups:
+                self.cloudflare_popups[key]=round(time.time()*1000)
+                labels.append(str(account.get('label') or account['id'])+'（'+account['id']+'）')
+        if not labels:
+            return
+        self.cloudflare_popups=dict(list(self.cloudflare_popups.items())[-1000:])
+        try:
+            save_json(self.runtime/'cloudflare-popups.json',self.cloudflare_popups)
+        except OSError:
+            self.notice.set('驗證提示紀錄無法儲存，重開介面後可能再次提示。')
+        dialog=tk.Toplevel(self.root)
+        dialog.title('Cloudflare 需要真人驗證')
+        dialog.configure(bg=PANEL)
+        self.label(dialog,'需要驗證的帳號：'+ '、'.join(labels),size=13,bold=True,
+                   wraplength=460).pack(padx=24,pady=(24,12))
+        self.label(dialog,'自動操作已暫停。請切回該帳號的 Chrome 手動完成驗證，再啟動監看。',
+                   wraplength=460).pack(padx=24,pady=(0,20))
+        self.button(dialog,'知道了',dialog.destroy,True).pack(padx=24,pady=(0,24))
+        dialog.lift()
+        dialog.bell()
+
     def render(self,state):
         version=state.get('version','?')
         self.service_version=version
@@ -513,11 +557,13 @@ class NativeUI:
                 connection += ' 登入服務有新版，請按「重新啟動服務」套用。'
         self.connection.set(f'獨立介面 v{UI_VERSION}　｜　{connection}')
         self.accounts={a['id']:a for a in state.get('accounts',[])}
+        self.show_cloudflare_alerts()
         self.refresh_logs()
         for ident,c in self.cards.items():
+            c['buttons']['restart'].config(state='normal' if ident not in self.busy else 'disabled')
             if ident not in self.accounts:
-                c['buttons']['open'].config(text='開啟／登入',state='normal' if ident not in self.busy else 'disabled')
-                for action in ('monitor','inspect','requeue','restart','rename'):
+                c['buttons']['open'].config(text='連接 Chrome',state='normal' if ident not in self.busy else 'disabled')
+                for action in ('monitor','inspect','requeue','rename'):
                     c['buttons'][action].config(state='disabled')
                 continue
             a = self.accounts[ident]
@@ -554,15 +600,80 @@ class NativeUI:
                 activeforeground='#ffffff',
                 font=('Microsoft JhengHei UI',10,'bold')
             )
-            c['buttons']['open'].config(text='切回視窗' if a.get('opened') else ('開啟視窗' if a.get('hasSession') else '開啟／登入'))
+            c['buttons']['open'].config(text='切回視窗' if a.get('opened') else '連接 Chrome')
             enabled={'open':True,'monitor':a.get('canStart') or a.get('canStop'),
                      'inspect':a.get('canInspect'),
                      'requeue':not login_only and a.get('opened') and a['phase'] not in {'watching','opening','submitting','leaving'},
-                     'restart':not login_only,
+                     'restart':True,
                      'rename':True}
             for action,b in c['buttons'].items():b.config(state='normal' if enabled[action] and ident not in self.busy else 'disabled')
 
+    def choose_chrome_profile(self, ident):
+        existing = getattr(self, 'profile_dialog', None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            return
+        chrome = next((Path(root)/'Google/Chrome/Application/chrome.exe'
+                       for key in ('ProgramFiles','ProgramFiles(x86)','LOCALAPPDATA')
+                       if (root := os.environ.get(key))
+                       and (Path(root)/'Google/Chrome/Application/chrome.exe').is_file()), None)
+        if chrome is None:
+            messagebox.showerror('選擇設定檔','找不到 Google Chrome。',parent=self.root)
+            return
+        try:
+            state_path = Path(os.environ['LOCALAPPDATA'])/'Google/Chrome/User Data/Local State'
+            profiles = json.loads(state_path.read_text(encoding='utf-8'))['profile']['info_cache']
+            choices = {str(value['name'])+'（'+directory+'）': directory
+                       for directory, value in profiles.items()}
+            if not choices:
+                raise ValueError('沒有可選取的設定檔')
+        except (OSError, ValueError, KeyError) as error:
+            messagebox.showerror('讀取設定檔','無法讀取 Chrome 設定檔：'+str(error),parent=self.root)
+            return
+        dialog = tk.Toplevel(self.root)
+        self.profile_dialog = dialog
+        dialog.title('綁定帳號 '+ident)
+        dialog.configure(bg=PANEL)
+        self.label(dialog, '在 Chrome 開啟要使用的設定檔，再從下方選擇同一個名稱。\n每張帳號卡片需使用不同設定檔。',
+                   wraplength=420).pack(padx=20,pady=20)
+        selected_profile = ttk.Combobox(dialog, values=list(choices), state='readonly', width=42)
+        selected_profile.pack(padx=20,pady=(0,20))
+        def bind_selected():
+            selection = selected_profile.get()
+            if selection not in choices:
+                messagebox.showinfo('選擇設定檔','請先從清單選擇要綁定的 Chrome 設定檔。',parent=dialog)
+                return
+            try:
+                directory = choices[selection]
+                name = selection
+                if not messagebox.askyesno('確認 Chrome 設定檔',
+                        '將「'+name+'」綁定到帳號 '+ident+'？',parent=dialog):
+                    return
+                data = {**self.config(), 'id':ident, 'action':'open',
+                        'profileDirectory':directory, 'chooseProfile':True}
+            except (OSError, ValueError, KeyError) as error:
+                messagebox.showerror('讀取設定檔','無法讀取目前 Chrome 設定檔：'+str(error),parent=dialog)
+                return
+            def connect():
+                self.client.ensure_server(login_only=True)
+                current = self.client.alive()
+                if not current or current.get('version') != VERSION:
+                    raise ValueError('請先在新版總控重新啟動服務，套用設定檔綁定修正。')
+                return self.client.call('action',data,timeout=190)
+            dialog.destroy()
+            self.submit(ident,connect)
+            self.notice.set('正在綁定 '+name+' 到帳號 '+ident+'，請留意 Chrome 連線授權。')
+        self.button(dialog,'確認設定檔並綁定',bind_selected,True).pack(padx=20,pady=(0,10))
+        self.button(dialog,'取消',dialog.destroy).pack(padx=20,pady=(0,20))
+        subprocess.Popen([str(chrome),'chrome://profile-picker/'])
+
     def act(self,ident,action):
+        if action == 'restart' or (action == 'open' and not self.accounts.get(ident, {}).get('opened')):
+            if self.accounts.get(ident, {}).get('phase') in {'watching','recovering','opening','submitting','leaving','waiting','ready','uncertain'}:
+                messagebox.showinfo('確認目前任務','請先停止助手任務並確認網站隊伍，再重新綁定設定檔。',parent=self.root)
+                return
+            self.choose_chrome_profile(ident)
+            return
         if action=='api_inventory':
             def refresh_selected_box():
                 current=next((a for a in self.client.call()['accounts'] if a['id']==ident),{})
@@ -582,7 +693,7 @@ class NativeUI:
             messagebox.showinfo('套用修正','目前背景服務仍是舊版。請先按右上「重新啟動服務」套用修正；可能中斷目前隊伍。',parent=self.root)
             return
         confirms={'requeue':'會依目前視窗退出或返回列表，放棄原順位，再開始找新滿箱。只影響此帳號。',
-                  'restart':'會關閉並重開此帳號的專用視窗，可能中斷此帳號隊伍。登入資料保留，其他帳號不變。',
+                  'restart':'會中止此帳號的助手任務，再重新連接目前 Chrome。請重新確認網站隊伍。',
                   'reset':'只清除助手任務，不會替你退出網站隊伍。確認已完成或退出隊伍？'}
         if action in confirms and not messagebox.askyesno('確認操作',confirms[action],parent=self.root):return
         try:
@@ -594,9 +705,9 @@ class NativeUI:
             config = {}
         data = {**config, 'id':ident, 'action':action, 'confirmed':True}
         def send_action():
-            if action == 'open':
+            if action in {'open','restart'}:
                 self.client.ensure_server(login_only=True)
-            return self.client.call('action', data)
+            return self.client.call('action', data, timeout=190 if action in {'open','restart'} else 40)
         self.submit(ident, send_action)
 
     def batch(self,action):

@@ -9,6 +9,7 @@ from email.utils import parsedate_to_datetime
 import random
 import re
 import secrets
+import subprocess
 import time
 from urllib.parse import parse_qs, urlencode, urlparse
 import webbrowser
@@ -51,6 +52,26 @@ from service_runtime import bind_listener, remember_runtime
 ORIGIN = 'https://on-line.1kuji.com'
 LIST_PATH = '/Form/Product/SelectBox.aspx'
 DETAIL_PATH = '/Form/Product/SelectBoxDetail.aspx'
+FETCH_BOX_HTML = """async (url) => {
+    if (location.href !== url) throw new Error('分頁網址已變更');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+        const response = await fetch(url, {
+            credentials: 'include',
+            cache: 'no-store',
+            signal: controller.signal
+        });
+        return {
+            status: response.status,
+            url: response.url,
+            headers: { 'cf-mitigated': response.headers.get('cf-mitigated') || '' },
+            html: await response.text()
+        };
+    } finally {
+        clearTimeout(timeout);
+    }
+}"""
 ACTIVE = {'watching', 'opening', 'submitting', 'waiting', 'ready', 'uncertain', 'leaving'}
 LABELS = {'closed':'未開啟', 'idle':'待命', 'watching':'監看新箱', 'opening':'開啟箱子',
           'recovering':'等待入場', 'leaving':'退出並重排中', 'submitting':'已觸發排隊', 'waiting':'已確認排隊', 'ready':'輪到你了', 'uncertain':'需要確認'}
@@ -140,6 +161,8 @@ class Account:
     def __init__(self, manager, ident):
         self.manager, self.id = manager, ident
         self.label = f'帳號 {ident}'
+        self.chrome_profile_directory = None
+        self.profile_context_id = None
         self.context = self.page = self.task = None
         self.http_session: 'aiohttp.ClientSession | None' = None
         self.user_id: 'str | None' = None
@@ -168,6 +191,7 @@ class Account:
                 saved = json.loads(self.journal.read_text(encoding='utf-8'))
                 self.config = saved.get('config', {})
                 self.label = saved.get('label', self.label)
+                self.chrome_profile_directory = saved.get('chromeProfile')
                 if saved.get('phase') in ACTIVE:
                     self.phase = 'uncertain'
                     self.target, self.metrics = saved.get('target'), saved.get('metrics', {})
@@ -176,7 +200,7 @@ class Account:
                 self.phase, self.note = 'uncertain', '上次紀錄無法讀取，請確認網站狀態後結束本次任務。'
 
     def persist(self):
-        value = {'phase':self.phase, 'label':self.label, 'config':self.config, 'target':self.target, 'metrics':self.metrics}
+        value = {'phase':self.phase, 'label':self.label, 'config':self.config, 'target':self.target, 'metrics':self.metrics, 'chromeProfile':self.chrome_profile_directory}
         temp = self.journal.with_suffix('.tmp')
         with temp.open('w', encoding='utf-8') as f:
             json.dump(value, f, ensure_ascii=False)
@@ -228,131 +252,137 @@ class Account:
 
 
     async def sync_cookies(self):
-        """Sync browser cookies into the aiohttp session and extract userId.
+        # The attached browser owns authentication and all website requests.
+        return
 
-        Called after every browser navigation so HTTP requests can proceed
-        without the browser being open.  Skips gracefully when page is closed.
-        """
-        if not self.page or self.page.is_closed() or not self.context:
-            return
-        cookies = await self.context.cookies(["https://on-line.1kuji.com"])
-        cookie_dict = {c["name"]: c["value"] for c in cookies}
-        if self.http_session and not self.http_session.closed:
-            await self.http_session.close()
-        self.http_session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=20),
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-        self.http_session.cookie_jar.update_cookies(cookie_dict)
-        try:
-            uid_js = "() => { const m = document.documentElement.innerHTML.match(/userId\\s*:\\s*'([^']{1,80})'/); return m ? m[1] : null; }"
-            uid = await self.page.evaluate(uid_js)
-            if uid:
-                self.user_id = uid
-                try:
-                    login_store.save(self.manager.runtime / 'login-chrome' / f'{self.id}.bin', cookies)
-                except OSError:
-                    self.event('本機登入記憶未能儲存，瀏覽器設定檔仍保留。')
-        except Exception:
-            pass
+    async def pick_chrome_page(self, browser, choose=False, directory=None):
+        if self.manager.picker_lock.locked():
+            raise ValueError('另一張帳號卡片正在綁定，請稍候。')
+        directory = directory or (None if choose else self.chrome_profile_directory)
+        if not isinstance(directory, str) or not directory or '/' in directory or '\\' in directory or directory in {'.','..'}:
+            raise ValueError('請先在總控選擇並確認 Chrome 設定檔。')
+        async with self.manager.picker_lock:
+            self.note = '正在辨識已開啟 Chrome 視窗的設定檔。'
+            self.event(self.note)
+            candidates = {}
+            for context in browser.contexts:
+                for page in list(context.pages):
+                    if page.is_closed():
+                        continue
+                    session = await context.new_cdp_session(page)
+                    try:
+                        info = (await session.send('Target.getTargetInfo'))['targetInfo']
+                    except PlaywrightError:
+                        if page.is_closed():
+                            continue
+                        raise
+                    finally:
+                        await session.detach()
+                    profile_id = info.get('browserContextId')
+                    if profile_id and profile_id not in candidates:
+                        candidates[profile_id] = (context,page)
+            selected = None
+            for profile_id, (context,page) in candidates.items():
+                known = self.manager.profile_directories.get(profile_id)
+                if known is None:
+                    probe = await self.new_entry_page(parent_page=page, parent_context=context,
+                                                      expected_profile=profile_id)
+                    try:
+                        await probe.goto('chrome://version/', wait_until='domcontentloaded', timeout=10000)
+                        profile_path = (await probe.locator('#profile_path').inner_text(timeout=5000)).strip()
+                        known = Path(profile_path).name
+                        self.manager.profile_directories[profile_id] = known
+                    finally:
+                        await probe.close()
+                if known == directory:
+                    selected = profile_id, context, page
+                    break
+            if selected is None:
+                raise ValueError('未找到所選設定檔的可連接視窗。請先開啟該 Chrome 設定檔的一番賞分頁，並允許遠端偵錯。')
+            profile_id, context, page = selected
+            if any(a is not self and (a.profile_context_id == profile_id or a.chrome_profile_directory == directory)
+                   for a in self.manager.accounts.values()):
+                raise ValueError('這個設定檔已綁定另一張帳號卡片。')
+            site_pages = []
+            for candidate_context in browser.contexts:
+                for candidate in list(candidate_context.pages):
+                    if candidate.is_closed() or urlparse(candidate.url).netloc != 'on-line.1kuji.com':
+                        continue
+                    session = await candidate_context.new_cdp_session(candidate)
+                    try:
+                        info = (await session.send('Target.getTargetInfo'))['targetInfo']
+                    finally:
+                        await session.detach()
+                    if info.get('browserContextId') == profile_id:
+                        site_pages.append((candidate_context,candidate))
+            if len(site_pages) > 1:
+                raise ValueError('此設定檔有多個一番賞分頁，請保留要交給助手的一頁再綁定。')
+            if site_pages:
+                context, page = site_pages[0]
+            else:
+                page = await self.new_entry_page(parent_page=page, parent_context=context,
+                                                 expected_profile=profile_id)
+                await page.goto(ORIGIN, wait_until='commit', timeout=30000)
+            session = await context.new_cdp_session(page)
+            try:
+                window = await session.send('Browser.getWindowForTarget')
+            finally:
+                await session.detach()
+            self.chrome_profile_directory = directory
+            return window['windowId'], profile_id, context, page
 
     async def open(self, data):
-        login_only = self.manager.login_only
-        if self.page and not self.page.is_closed():
-            if login_only:
-                await self.focus_window()
+        browser = self.manager.attached_browser
+        if browser is not None and not browser.is_connected():
+            self.manager.browser_disconnected(browser)
+        if self.page and not self.page.is_closed() and not data.get('chooseProfile'):
+            try:
+                await asyncio.wait_for(self.focus_window(), timeout=8)
                 return
-            if self.phase == 'idle' and urlparse(self.page.url).path == '/Form/Product/ProductDetail.aspx':
-                await self.start(data)
-                return
-            await self.focus_window()
-            if self.phase == 'uncertain':
+            except (PlaywrightError, TimeoutError):
+                await self.cancel_observer()
+                if self.page:
+                    self.page.remove_listener('close', self.on_closed)
+                    self.page.remove_listener('websocket', self.watch_socket)
+                    self.page = None
+        config = None if self.manager.login_only else validate_config(data)
+        async with self.manager.browser_lock:
+            browser = self.manager.attached_browser
+            if browser is None or not browser.is_connected():
+                self.note = '正在連接 Chrome，請查看 Chrome 的允許連線提示（最多等待60秒）。'
+                self.event(self.note)
+                self.persist()
                 try:
-                    await self.inspect_current()
-                except Exception:
-                    pass
-            return
-        if not login_only:
-            config = validate_config(data)
+                    browser = await self.manager.playwright.chromium.connect_over_cdp('chrome', timeout=60000)
+                except PlaywrightError as error:
+                    self.note = 'Chrome 連線未完成。請確認遠端偵錯已啟用，並在 Chrome 按允許後重新連接。'
+                    self.event(self.note+' 錯誤類型：'+type(error).__name__)
+                    self.persist()
+                    raise ValueError(self.note) from error
+                self.manager.attached_browser = browser
+                browser.on('disconnected', lambda *_: self.manager.browser_disconnected(browser))
+        window_id, profile_id, context, page = await self.pick_chrome_page(browser, choose=bool(data.get('chooseProfile')), directory=data.get('profileDirectory'))
+        if self.context and hasattr(self, 'context_close_callback'):
+            self.context.remove_listener('close', self.context_close_callback)
+        if self.page:
+            self.page.remove_listener('close', self.on_closed)
+            self.page.remove_listener('websocket', self.watch_socket)
+        self.profile_context_id = profile_id
+        self.context, self.page = context, page
         self.cancel.clear()
-        # A closed main tab can leave the profile owned by its other tabs.
-        if self.context is None:
-            browser = self.manager.playwright.chromium
-            profile = self.manager.runtime / 'profiles-chrome' / self.id
-            profile.mkdir(parents=True, exist_ok=True)
-        self.entry_pending = not login_only
-        if self.context is None:
-            try:
-                self.context = await browser.launch_persistent_context(
-                    str(profile), channel='chrome', headless=False, no_viewport=True)
-            except Exception as error:
-                self.entry_pending = False
-                self.event('Chrome 啟動失敗：'+str(error)[:300])
-                raise ValueError('帳號 '+self.id+' 的 Chrome 未成功啟動；專用視窗可能仍占用設定檔。請先確認該帳號視窗，再使用重新啟動帳號；完整原因已記入執行紀錄。') from error
-        try:
-            saved = login_store.restore(self.manager.runtime / 'login-chrome' / f'{self.id}.bin', await self.context.cookies())
-            if saved:
-                await self.context.add_cookies(saved)
-                self.event('已還原本機登入資料，等待網站確認有效性')
-        except PlaywrightError as error:
-            context = self.context
-            self.context = self.page = None
-            self.entry_pending = False
-            try:
-                await context.close()
-            except Exception:
-                pass
-            self.phase, self.note = 'closed', 'Chrome 在還原登入時已關閉或失去連線，請重新開啟此帳號視窗。'
-            self.event(self.note)
-            self.persist()
-            raise ValueError(self.note) from error
-        except (OSError, ValueError, KeyError, TypeError):
-            self.event('本機登入記憶無法還原，請在專用視窗登入。')
-        self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
-        # Extra manually opened pages are never closed automatically.
-        opened_context = self.context
-        self.context.on('close', lambda *_: self.on_context_closed(opened_context))
-        self.page.on('close', self.on_closed)
-        self.page.on('websocket', self.watch_socket)
-        if login_only:
-            if self.phase == 'closed':
-                self.phase, self.note = 'idle', '已開啟專用視窗，請手動登入。'
-            if await self.load_home(wait_until='commit'):
-                self.event('已開啟專用登入視窗')
-            return
-        if self.phase == 'uncertain' and self.target and self.config.get('pid'):
-            url = detail_url(self.config['pid'], self.target)
-            await self.page.goto(url, wait_until='domcontentloaded', timeout=30000)
-            await self.sync_cookies()
-            self.cancel = asyncio.Event()
-            self.task = asyncio.create_task(self.observe_queue())
-        elif self.phase == 'uncertain':
-            self.config=config
-            await self.page.goto(config['url'], wait_until='domcontentloaded', timeout=30000)
-            self.begin_entry()
-        else:
+        self.entry_pending = False
+        self.context_close_callback = lambda *_: self.on_context_closed(context)
+        context.on('close', self.context_close_callback)
+        page.on('close', self.on_closed)
+        page.on('websocket', self.watch_socket)
+        if config is not None:
             self.config = config
-            self.phase, self.note = 'idle', '請在專用視窗完成登入，再啟動監看。'
-            if not await self.load_home():
-                return
-            soup = BeautifulSoup(await self.page.content(), 'html.parser')
-            self.check_cloudflare(soup.get_text())
-            gate = entry_limited(soup.get_text())
-            on_login = bool(soup.select_one('input[type="password"]')) or 'Login' in urlparse(self.page.url).path
-            if on_login:
-                self.note = '尚未登入，請在專用視窗登入後助手會自動繼續。'
-                self.begin_entry()
-            elif gate:
-                if self.config.get('entryRefresh', True):
-                    self.note = '偵測到入場限制，開啟五個分頁刷新中。'
-                    self.begin_entry()
-                else:
-                    self.phase, self.note = 'idle', '網站暫時限制入場；已關閉自動入場刷新，請手動操作。'
-                    self.entry_pending = False
-            else:
-                self.phase, self.note = 'idle', '請在專用視窗選擇商品後助手會自動繼續。'
-                self.entry_pending = False
-        self.event('已開啟獨立登入視窗')
+        if self.phase == 'closed':
+            self.phase = 'idle'
+        self.note = '已綁定 Chrome 設定檔 '+self.chrome_profile_directory+'，可切回視窗確認登入。'
         self.persist()
+        self.event(self.note)
+        await page.bring_to_front()
 
     async def load_home(self, wait_until='domcontentloaded'):
         page = self.page
@@ -391,7 +421,7 @@ class Account:
             self.phase, self.note = 'uncertain', '專用視窗已關閉，排隊可能中斷；請人工確認，不會自動重送。'
         elif self.phase in {'waiting', 'ready'}:
             # API polling loop will keep running; don't downgrade to uncertain yet.
-            self.note = '專用視窗已關閉，API 繼續監測排隊順位。'
+            self.note = '專用視窗已關閉，順位更新已停止。請重新開啟並確認網站狀態。'
         elif self.phase not in {'uncertain'}:
             self.phase, self.note = 'closed', '專用視窗已關閉。'
         self.persist()
@@ -429,8 +459,8 @@ class Account:
         self.persist()
         self.event('輪到你了')
 
-    def check_cloudflare(self, text='', response=None):
-        headers = getattr(response, 'headers', None)
+    def check_cloudflare(self, text='', response=None, headers=None):
+        headers = headers if headers is not None else getattr(response, 'headers', None)
         if not requires_cloudflare_verification(text, headers):
             return
         if not self.cloudflare_paused:
@@ -496,6 +526,48 @@ class Account:
             self.event('網站要求冷卻，所有入場分頁一起等待')
         return response
 
+    async def new_entry_page(self, parent_page=None, parent_context=None, expected_profile=None):
+        parent_page = parent_page if parent_page is not None else self.page
+        parent_context = parent_context if parent_context is not None else self.context
+        expected_profile = expected_profile if expected_profile is not None else self.profile_context_id
+        marker = 'about:blank#kuji-entry-'+secrets.token_hex(16)
+        session = await parent_context.new_cdp_session(parent_page)
+        try:
+            parent = (await session.send('Target.getTargetInfo'))['targetInfo']
+            if parent.get('browserContextId') != expected_profile:
+                raise ValueError('目前分頁已不是原帳號的 Chrome 設定檔。')
+            opened = await session.send('Runtime.evaluate', {
+                'expression':'window.open('+json.dumps(marker)+', "_blank") !== null',
+                'userGesture':True, 'returnByValue':True})
+            if not opened.get('result', {}).get('value'):
+                raise ValueError('Chrome 未能開啟入場分頁。')
+            for _ in range(50):
+                for context in self.manager.attached_browser.contexts:
+                    for page in context.pages:
+                        if page.url != marker:
+                            continue
+                        child = await context.new_cdp_session(page)
+                        try:
+                            info = (await child.send('Target.getTargetInfo'))['targetInfo']
+                        finally:
+                            await child.detach()
+                        if info.get('browserContextId') != expected_profile:
+                            raise ValueError('新增分頁的登入設定檔不符，已停止。')
+                        return page
+                await asyncio.sleep(.1)
+            raise ValueError('未能取得新增的入場分頁。')
+        except BaseException:
+            try:
+                targets = (await session.send('Target.getTargets'))['targetInfos']
+                for target in targets:
+                    if target.get('url') == marker:
+                        await session.send('Target.closeTarget', {'targetId':target['targetId']})
+            except PlaywrightError:
+                pass
+            raise
+        finally:
+            await session.detach()
+
     async def wait_entry_tabs(self):
         original=self.page
         source=original.url
@@ -516,7 +588,7 @@ class Account:
         try:
             for _ in range(4):
                 if self.cancel.is_set():raise asyncio.CancelledError()
-                extras.append(await self.context.new_page())
+                extras.append(await self.new_entry_page())
             self.event('已建立同帳號5個入場分頁，各自隨機抖動刷新')
             tasks=[asyncio.create_task(candidate(original))]+[asyncio.create_task(candidate(p,True)) for p in extras]
             pending=set(tasks)
@@ -576,7 +648,7 @@ class Account:
                     self.entry_pending = False
                     self.persist(); return
                 self.phase='recovering';self.cancel.clear()
-                if entry_limited(text) and self.context:
+                if entry_limited(text):
                     await self.wait_entry_tabs()
                 else:
                     await self.wait_temporary_page(entry_only=True)
@@ -620,92 +692,33 @@ class Account:
         return True
 
     async def fetch_boxes(self):
-        """Fetch the box list page via aiohttp (no browser needed).
-
-        Falls back to the Playwright context request if the HTTP session is
-        unavailable so the browser-open path keeps working unchanged.
-        """
         started = time.monotonic()
-        if self.http_session and not self.http_session.closed:
-            async with self.http_session.get(self.config['url'],
-                    headers={'Cache-Control': 'no-cache'}) as resp:
-                self.check_cloudflare(response=resp)
-                if resp.status != 200:
-                    raise ValueError(f'網站回傳 HTTP {resp.status}，監看停止，請人工確認。')
-                final_url = str(resp.url)
-                url, pid = list_url(final_url)
-                if pid != self.config['pid']:
-                    raise ValueError('網站已導向其他商品，監看停止。')
-                body = await resp.text()
-                self.check_cloudflare(BeautifulSoup(body, 'html.parser').get_text(' '))
-                boxes = parse_boxes(body)
-        else:
-            # Fallback: browser context request (requires browser open)
-            if not self.context:
-                raise ValueError('請先開啟專用視窗並登入，HTTP session 尚未建立。')
-            response = await self.context.request.get(self.config['url'], timeout=15000, headers={'Cache-Control':'no-cache'})
-            try:
-                self.check_cloudflare(response=response)
-                if response.status != 200:
-                    raise ValueError(f'網站回傳 HTTP {response.status}，監看停止，請人工確認。')
-                url, pid = list_url(response.url)
-                if pid != self.config['pid']:
-                    raise ValueError('網站已導向其他商品，監看停止。')
-                body = await response.text()
-                self.check_cloudflare(BeautifulSoup(body, 'html.parser').get_text(' '))
-                boxes = parse_boxes(body)
-            finally:
-                await response.dispose()
+        page = self.page
+        if not page or page.is_closed():
+            raise ValueError('Chrome 分頁已關閉，監看停止。')
+        page_url = page.url
+        _, pid = list_url(page_url)
+        if pid != self.config['pid']:
+            raise ValueError('目前分頁是其他商品，監看停止。')
+        response = await page.evaluate(FETCH_BOX_HTML, page_url)
+        if self.cancel.is_set():
+            raise asyncio.CancelledError()
+        if self.page is not page or page.url != page_url:
+            raise ValueError('查詢期間分頁已切換，監看停止。')
+        self.check_cloudflare(headers=response['headers'])
+        if response['status'] != 200:
+            raise ValueError('選箱查詢回傳 HTTP '+str(response['status'])+'，請查看網站。')
+        _, pid = list_url(response['url'])
+        if pid != self.config['pid']:
+            raise ValueError('選箱查詢導向其他商品，監看停止。')
+        body = response['html']
+        self.check_cloudflare(BeautifulSoup(body, 'html.parser').get_text(' '))
+        boxes = parse_boxes(body)
         self.metrics.update(lastCheckedAt=now(), requestMs=round((time.monotonic()-started)*1000))
         return boxes
 
     async def api_wait_count(self):
-        """Poll GetLotteryBoxWaitCount to read queue position without the browser.
-
-        Returns a dict with 'ahead' (int | None).  Never raises -- returns {}
-        on any network or parse error so the caller can keep the last known state.
-        """
-        if not self.http_session or self.http_session.closed:
-            await self.sync_cookies()
-        if not self.http_session or self.http_session.closed:
-            return {}
-        if not self.user_id and self.page and not self.page.is_closed():
-            try:
-                uid_js = "() => { const m = document.documentElement.innerHTML.match(/userId\\s*:\\s*'([^']{1,80})'/); return m ? m[1] : null; }"
-                uid = await self.page.evaluate(uid_js)
-                if uid:
-                    self.user_id = uid
-            except Exception:
-                pass
-        if not self.target or not self.config.get('pid') or not self.user_id:
-            return {}
-        endpoint = ORIGIN + DETAIL_PATH + '/GetLotteryBoxWaitCount'
-        body = {'userId': self.user_id, 'productId': self.config['pid'],
-                'hashedDisplayId': self.target['id']}
-        try:
-            async with self.http_session.post(endpoint, json=body,
-                    headers={'Origin': ORIGIN,
-                             'Referer': detail_url(self.config['pid'], self.target),
-                             'Content-Type': 'application/json'}) as resp:
-                self.check_cloudflare(response=resp)
-                data = await resp.json(content_type=None)
-            result = data.get('d', {})
-            if isinstance(result, str):
-                try:
-                    result = json.loads(result)
-                except (ValueError, TypeError):
-                    result = {}
-            if not isinstance(result, dict):
-                return {}
-            ahead = result.get('your_waiting_no')
-            if ahead is not None:
-                try:
-                    ahead = int(ahead)
-                except (ValueError, TypeError):
-                    ahead = None
-            return {'ahead': ahead}
-        except Exception:
-            return {}
+        return {}
 
     async def start(self, data):
         if self.phase not in {'idle','closed'}:
@@ -905,18 +918,8 @@ class Account:
 
     async def restart_account(self, data):
         await self.cancel_observer()
-        if self.context:
-            try:
-                await self.context.close()
-            except Exception:
-                pass
-        self.context = self.page = None
-        self.clear_queue_state()
-        self.phase, self.note = 'closed', '已重啟此帳號，登入設定保留；沒有自動提交排隊。'
-        self.metrics = {}
-        self.persist()
-        await self.open(data)
-        self.event('此帳號視窗已重新啟動，另外兩個帳號未變更')
+        await self.open({**data, 'chooseProfile':True})
+        self.event('已選擇並綁定 Chrome 設定檔，請確認帳號與商品。')
 
     async def hunt(self):
         try:
@@ -1197,114 +1200,18 @@ class Account:
         self.event(f'籤數回應診斷：HTTP {status}；{kind}；包含剩餘籤數文字={"是" if "残りくじ" in text else "否"}')
 
     async def query_inventory_api(self):
-        if self.cloudflare_paused:
+        if self.cloudflare_paused or self.phase in {'watching','opening','leaving'}:
             return {}
-        # List monitoring has no selected box; a stale UI request is a no-op.
-        if self.phase in {'watching','opening','leaving'}:
+        if not self.page or self.page.is_closed():
             return {}
-        if self.page and not self.page.is_closed():
-            current = urlparse(self.page.url)
-            if current.netloc != 'on-line.1kuji.com' or current.path != DETAIL_PATH:
-                return {}
-        if not self.config.get('pid') or not self.target or not self.target.get('id'):
-            if self.page and not self.page.is_closed():
-                url = urlparse(self.page.url)
-                if url.path == DETAIL_PATH:
-                    query = parse_qs(url.query)
-                    pid = query.get('pid', [''])[0]
-                    lbdid = query.get('lbdid', [''])[0]
-                    if pid and lbdid:
-                        self.config['pid'] = pid
-                        self.target = {'id': lbdid.upper(), 'seq': (self.target or {}).get('seq')}
-            if not self.config.get('pid') or not self.target or not self.target.get('id'):
-                raise ValueError('目前視窗未進入箱子，無法以 API 查詢箱子籤數。')
-
-        if not self.http_session or self.http_session.closed:
-            await self.sync_cookies()
-        if not self.http_session or self.http_session.closed:
-            raise ValueError('HTTP 連線未建立，請先開啟專用視窗。')
-
-        url = detail_url(self.config['pid'], self.target)
-        html = None
-        response_status = None
-        response_path = None
-        try:
-            async with self.http_session.get(url, timeout=aiohttp.ClientTimeout(total=10),
-                                            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}) as resp:
-                self.check_cloudflare(response=resp)
-                response_status = resp.status
-                response_path = urlparse(str(resp.url)).path
-                if resp.status == 200:
-                    html = await resp.text()
-        except CloudflarePaused:
-            raise
-        except Exception:
-            pass
-
-        if not html:
-            await self.sync_cookies()
-            try:
-                async with self.http_session.get(url, timeout=aiohttp.ClientTimeout(total=10),
-                                                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}) as resp:
-                    self.check_cloudflare(response=resp)
-                    if resp.status == 200:
-                        html = await resp.text()
-                    else:
-                        raise ValueError(f'網站回傳 HTTP {resp.status}')
-            except CloudflarePaused:
-                raise
-            except Exception as e2:
-                raise ValueError(f'以 API 查詢籤數失敗：{str(e2)[:100]}')
-
-        if html:
-            self.check_cloudflare(BeautifulSoup(html,'html.parser').get_text(' '))
-        info = parse_detail_html(html)
-        if info['remaining'] is None and not info['prizes']:
-            self.log_inventory_response(html, response_status, response_path)
-        if info['remaining'] is None and not info['prizes'] and self.page and not self.page.is_closed():
-            await self.sync_cookies()
-            async with self.http_session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                self.check_cloudflare(response=response)
-                if response.status == 200:
-                    retry_html = await response.text()
-                    self.check_cloudflare(BeautifulSoup(retry_html,'html.parser').get_text(' '))
-                    info = parse_detail_html(retry_html)
-                    if info['remaining'] is None and not info['prizes']:
-                        self.log_inventory_response(retry_html, response.status, urlparse(str(response.url)).path)
-        if info['remaining'] is not None or info['prizes']:
-            self.inventory = {
-                'remaining': info['remaining'],
-                'total': info['total'],
-                'prizes': info['prizes'],
-                'lastOneListed': info['lastOneListed'],
-                'source': 'api',
-                'readAt': now()
-            }
-            if info['ahead'] is not None and self.phase != 'ready':
-                self.queue_ahead = self.queue_no = info['ahead']
-                if self.phase == 'uncertain':
-                    self.phase = 'waiting'
-                    self.note = f'已接續隊伍，前方還有 {self.queue_ahead} 人。'
-            if info['remaining'] == 0:
-                self.queue_reason = 'SoldOut'
-                self.queue_alert = True
-                self.phase, self.note = 'uncertain', '箱子已售完。'
-            self.persist()
-            self.event(f'已透過 API 更新籤數：剩餘 {info["remaining"]} 枚')
-            if info['remaining'] == 0:
-                self.schedule_soldout_resume()
-            return self.inventory
-        else:
-            self.event('籤數查詢重試後仍無有效資料，保留上次庫存；請確認登入與網站狀態。')
-            raise ValueError('查詢回應沒有有效籤數，已保留上次資料；請確認登入與網站狀態。')
-
-    def schedule_soldout_resume(self):
-        key=(self.config.get('pid'),(self.target or {}).get('id'))
-        if (not self.config.get('autoResumeSoldOut',True) or not key[1]
-                or self.soldout_attempt==key or (self.soldout_task and not self.soldout_task.done())):
-            return
-        self.soldout_attempt=key
-        self.soldout_task=asyncio.create_task(self.resume_after_soldout(key))
+        current = urlparse(self.page.url)
+        if current.netloc != 'on-line.1kuji.com' or current.path != DETAIL_PATH:
+            return {}
+        if self.inventory.get('source') == 'api':
+            self.inventory = {}
+        await self.read_detail()
+        self.persist()
+        return self.inventory
 
     async def resume_after_soldout(self,key):
         async with self.lock:
@@ -1487,10 +1394,32 @@ class Manager:
         self.runtime.mkdir(parents=True, exist_ok=True)
         self.token = secrets.token_urlsafe(32)
         self.playwright = None
+        self.attached_browser = None
+        self.profile_directories = {}
         self.browser_lock = asyncio.Lock()
+        self.picker_lock = asyncio.Lock()
         self.exit_requested = asyncio.Event()
         self.shutting_down = False
         self.accounts = {i:Account(self, i) for i in 'ABC'}
+
+    def browser_disconnected(self, browser):
+        if self.attached_browser is not browser:
+            return
+        self.attached_browser = None
+        self.profile_directories.clear()
+        for account in self.accounts.values():
+            if account.context is None and account.page is None:
+                continue
+            account.cancel.set()
+            for task in (account.task, account.soldout_task):
+                if task and not task.done():
+                    task.cancel()
+            account.entry_pending = False
+            account.context = account.page = None
+            account.phase = 'uncertain' if account.target else 'closed'
+            account.note = 'Chrome 連線已中斷，請按連接 Chrome 後重新確認網站狀態。'
+            account.event(account.note)
+            account.persist()
 
     async def shutdown(self):
         # Finish queues before shutdown: stopping the browser driver can close
@@ -1503,14 +1432,6 @@ class Manager:
         tasks = [a.task for a in self.accounts.values() if a.task]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        # Flush native profile and the last verified login before stopping the driver.
-        for a in self.accounts.values():
-            if a.context:
-                try:
-                    await a.sync_cookies()
-                    await a.context.close()
-                except Exception:
-                    a.event('關閉時無法完成登入資料保存；沿用上次成功紀錄。')
         # Close all aiohttp sessions cleanly.
         for a in self.accounts.values():
             if a.http_session and not a.http_session.closed:
@@ -1547,14 +1468,14 @@ def create_app(manager):
             discord = json.loads((manager.runtime/'discord-status.json').read_text(encoding='utf-8'))
         except (OSError, ValueError):
             discord = {'enabled':False}
-        return web.json_response({'version':'1.5.20', 'loginOnly':manager.login_only, 'accounts':[a.state() for a in manager.accounts.values()], 'notifications':discord})
+        return web.json_response({'version':'1.5.30', 'loginOnly':manager.login_only, 'accounts':[a.state() for a in manager.accounts.values()], 'notifications':discord})
 
     async def action(request):
         if manager.shutting_down:
             raise ValueError('服務正在重新啟動，請稍候。')
         data = await request.json()
         ident, command = data.get('id'), data.get('action')
-        if manager.login_only and command not in {'open','focus','label','config'}:
+        if manager.login_only and command not in {'open','focus','label','config','restart'}:
             raise ValueError('控制台已關閉，目前僅能手動登入。')
         if ident not in manager.accounts:
             raise ValueError('帳號無效。')

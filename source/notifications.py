@@ -15,6 +15,15 @@ from urllib.parse import urlparse
 
 import aiohttp
 
+CLOUDFLARE_NOTICE = 'Cloudflare 要求真人驗證，自動操作已暫停。'
+
+
+def cloudflare_event_key(account):
+    if account.get('note') != CLOUDFLARE_NOTICE:
+        return None
+    detected_at = next((e.get('at') for e in reversed(account.get('events') or [])
+                        if e.get('message') == CLOUDFLARE_NOTICE), 'current')
+    return f'{account.get("id")}:cloudflare:{detected_at}'
 
 def save_json(path, value):
     path = Path(path)
@@ -60,7 +69,11 @@ def payload_for(account, event_type=None):
         fields.append({'name':'各賞剩餘／原始數量', 'value':'　'.join(
             f'{str(p.get("label", ""))[:16]} {p.get("remaining", "—")}/{p.get("total", "—")}' for p in prizes)[:1000]})
 
-    if sold_out:
+    if event_type == 'cloudflare':
+        title = '🛡️ Cloudflare 需要真人驗證'
+        desc = '此帳號出現 Cloudflare 安全驗證，自動操作已暫停。請切回此帳號的 Chrome 視窗，手動完成驗證後再啟動監看。'
+        color = 0xF38020
+    elif sold_out:
         title = '📢 籤筒已抽完（售完）'
         auto_resume = account.get('config', {}).get('autoResumeSoldOut', True)
         desc = '目前鎖定的箱子籤數已抽完（售完）。' + ('已自動返回列表重新尋找新開滿箱。' if auto_resume else '請切回專用視窗選擇其他箱子。')
@@ -154,11 +167,17 @@ class Notifier:
             entry_passed_event = bool(entry_passed_at) and ('entry_passed' in config.get('events', ['ready', 'uncertain', 'sold_out', 'entry_passed']))
 
             candidates = []
+            cloudflare = cloudflare_event_key(account)
+            if cloudflare and config.get('cloudflare_enabled', True):
+                if cloudflare not in self.ledger:
+                    candidates.append(('cloudflare', cloudflare))
             if entry_passed_event:
                 ep_key = f'{account.get("id")}:entry_passed:{entry_passed_at}'
                 if ep_key not in self.ledger:
                     candidates.append(('entry_passed', ep_key))
-            if waiting:
+            if cloudflare:
+                pass
+            elif waiting:
                 wkey = event_key(account) + ':ahead:' + str(threshold)
                 candidates.append(('waiting', wkey))
             elif sold_out_event:
@@ -169,7 +188,7 @@ class Notifier:
                 candidates.append((phase, event_key(account)))
 
             for event_type, key in candidates:
-                if event_type != 'entry_passed' and key in self.ledger:
+                if event_type not in {'entry_passed', 'cloudflare'} and key in self.ledger:
                     previous = self.ledger[key]
                     interval = max(10, int(config.get('repeat_seconds', 60))) * 1000
                     if (not config.get('repeat_enabled') or previous.get('state') != 'sent'

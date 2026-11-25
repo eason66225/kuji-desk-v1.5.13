@@ -1,61 +1,44 @@
-# Kuji Desk AI 交接
+# Kuji Desk AI 接手摘要
 
-更新於 2026-11-25。從此頁和同目錄的 `AGENTS.md` 開始。只有追查舊版決策時才讀 `HANDOFF.md`。介面操作查 `使用說明.md`。
+更新：2026-11-25。先讀本檔及 AGENTS.md；舊版決策查 HANDOFF.md，操作查 使用說明.md。
 
-## 專案與版本
+## 現版與架構
 
-- 專案名稱為 suto 1 ban kuji（Kuji Desk）。Windows 桌面總控管理 A／B／C 三個獨立的一番賞帳號，提供監看、隊伍與庫存顯示、歷史紀錄和 Discord 通知。
-- 來源位於 `C:/Users/eason/Documents/Codex/PrintLab/work/kuji-manager`。`C:/Users/eason/Documents/ChatGPT/一番賞` 是接手入口。來源掛在 PrintLab 父目錄，操作 Git 時限於本專案。
-- 桌面 UI 和服務為 **v1.5.20**，開窗使用本機 Chrome。關閉控制台可開專用視窗登入；首頁導覽被中斷時保留視窗並記錄狀態。分享版位於 `../KujiDesk-share-v1.5.20/KujiDesk.exe`。來源、打包檔、執行中的服務要分別確認。
-- 相對來源目錄的 Runtime 為 `../../Runtime/kuji-manager`。分享版可用本機 AppData 的 Runtime，並透過已認證的探測重用既有服務。A／B／C 各用 `profiles-chrome/<帳號>`，登入備份為 `login-chrome/<帳號>.bin`，由 Windows DPAPI 保護。首次切換至 Chrome 需要手動登入。
+- 桌面 UI／分享包 v1.5.34；服務相容版本 VERSION=1.5.30。勿將這兩種版本視為不一致故障。
+- 來源入口 desktop.py；manager.py 管理本機 18766 認證 API、帳號與任務；native_ui.py 為 Tk 桌面介面；notifications.py 為獨立 DC 通知程序。
+- 依賴為 aiohttp 3.14.5、Playwright 1.65.2、BeautifulSoup 4.15.0。Windows 打包環境 Python 3.13.1、PyInstaller 6.22.3。
+- 使用者啟用 Chrome 遠端偵錯並允許連線後，用 connect_over_cdp('chrome', timeout=60000) 接管既有 Chrome；不是無頭模式，也不另外啟動專用 profile。
+- Chrome 多個真實設定檔可能只呈現一個 Playwright context。逐頁 Target.getTargetInfo 的 browserContextId 才能區分 profile；外部 context 不可關閉。
 
-## 檔案入口
+## 主要機制與陷阱
 
-| 要改的範圍 | 從這裡找 |
-| --- | --- |
-| 開窗、監看、排隊狀態、售完接續 | `manager.py` 的 `Account`，先定位 `open`、`start`、`observe_queue`、`reconcile_queue_page` 或 `leave_and_requeue` |
-| 商品網址與入場狀態 | `manager.py` 的 `entry_url`、`validate_config`、`recover_entry`，以及 `cloudflare_pause.py` |
-| 籤數、各賞、順位 | `details.py` 解析頁面，`manager.py` 的 `query_inventory_api` 與隊伍狀態同步。順位可讀 JSON，籤數的「API」是 HTTP GET 後解析 HTML |
-| 桌面控制台、批次更新、歷史 | `native_ui.py` 的 `NativeUI`、`batch`、`show_logs` 和 `Client`；F5 更新 GUI 資料 |
-| 啟動與發行 | `desktop.py` 分派 GUI／服務／通知，`service_runtime.py` 管理 18766 與 Runtime 尋址，`build_exe.py` 打包 |
-| 登入與通知 | `login_store.py` 負責本機登入備份；`notifications.py` 管理 Discord 設定、通知與去重 |
+- 綁定：GUI 從 Local State 的 info_cache 顯示明確名稱／目錄下拉清單，預設不選；禁止以 last_used 代替本人選取。B 曾因讀到 A 的 Default 被判定重複。
+- pick_chrome_page 掃描開啟中的 profiles，用短暫 chrome://version 頁辨識 profile_path 的目錄名稱，快取 profile ID→目錄，斷線清除。既有網站頁不導航；重複綁定拒絕。
+- 原生 profile-picker 為 browser_ui target。選既有視窗未必產生新 page；CLI 帶 nonce 開頁也不可靠，不能用其作唯一完成訊號。
+- 共用 CDP 連線以 browser_lock 串行建立；disconnected 清引用及取消任務，舊回呼不得清除新連線。GUI open 的等待涵蓋授權時間。
+- fetch_boxes 用 page.evaluate(FETCH_BOX_HTML) 發同源 fetch，credentials=include、cache=no-store、15 秒 AbortController。核對回應 URL／商品／HTTP／驗證訊號，再解析 HTML；精確比對籤數，不能用 includes。
+- 正常找箱不整頁 reload；庫存／順位從頁面 DOM／網站訊號讀取。不可宣稱官方 JSON API 或把失敗讀取當 0。
+- 五分頁只用於明確一時入場限制並受 entryRefresh 控制，各頁依 minSeconds/maxSeconds 抖動；429/503 明確冷卻共用，首個同商品成功頁接續。
+- new_entry_page 必須從原 profile 分頁 window.open 並核對 browserContextId；共享 context.new_page 會建錯 profile，Target.createTarget 指定一般 profile ID 也不支援。只清理本次助手追蹤的頁面。
+- 排隊提交一次，結果不明讀回；不自動付款、處理驗證或重送。外部 Chrome 在服務關閉後保留。
+- Cloudflare 暫停 note 為固定訊息。notifications.cloudflare_event_key 由該 note 與同訊息事件 at 產生每次驗證的鍵。
+- cloudflare_enabled 預設 true，cloudflare_popup 預設 false，存於本機 discord.json。DC 與本機提示分開勾選；提示只在 GUI 開啟時生效，非模態 Toplevel，不阻塞輪詢。
+- DC 與本機提示各自去重；本機 cloudflare-popups.json 不可打包。關閉 Cloudflare DC 通知也不應轉發成一般 uncertain 通知。
+- 「已通過入場限制」事件仍可選；作者目前僅在本機關閉。不要將 Runtime 偏好複製到來源或分享包。
 
-## 目前最重要的未解問題
+## 已驗證與待驗證
 
-- **舊 Brave 版的驗證診斷。** 最後一次診斷認證到本機服務 v1.5.16，並核對 A、C 是獨立 Brave 程序。兩個商品頁視窗標題仍為「請稍候…」，總控卻顯示「請選擇商品」。當時電腦操作擷取失敗，缺少實際頁面內容與 HTTP 證據，反覆驗證的根因未明。當時帳號狀態僅供比對。
-- 使用者在專用視窗自行完成驗證。後續若收到同一問題，先核對當下版本、視窗畫面和總控紀錄。若確認畫面是安全驗證但總控誤判待命，檢查 `Account.check_cloudflare` 何時收到導覽回應或頁面證據，優先修正暫停與提示。手動驗證完成後，分別確認實站選箱頁及監看狀態。
-- v1.5.18 的 78 項回歸、隔離 Brave 導覽中斷及 EXE 自檢通過。已開啟新版 GUI；當時登入服務仍是 v1.5.17，保留既有登入視窗。重啟會沿用登入模式。
-- v1.5.17 的 76 項回歸、隔離 Brave 登入模式、Tk 按鈕狀態及分享版 EXE 自檢均通過。當次已開啟新版桌面視窗，確認 18766 未啟動。這些結果只覆蓋本機行為。完整關閉專用瀏覽器後的實站排隊流程也未驗證。
+已驗證：Python 語法、Windows EXE 打包、實際多 profile Chrome 連接、分頁內 fetch HTTP 200／100 箱且 timeOrigin 不變、同 profile window.open、v1.5.34 設定頁兩勾選項與儲存鈕可見、實際 Discord 測試 HTTP 200。換 GUI／通知程序時保留 v1.5.30 服務及網站任務。
 
-## 維護重點
+未驗證：其他電腦首次使用、五分頁入場通過後的完整流程、新 Cloudflare DC／彈窗的實際挑戰觸發。舊瀏覽器架構的測試契約部分過時；依使用者要求近期未跑離線測試，不得宣稱現版全套回歸通過。
 
-- 先用現有的 `native_ui.Client(runtime).alive()` 讀版本與必要狀態。服務使用 `127.0.0.1:18766`。執行事件在 Runtime 的 `events-A.jsonl` 等檔案，啟動問題看 `desktop.log` 或 `native-server.log`。只輸出必要欄位。
-- 以同帳號、同商品、同箱核對狀態。結果不明時確認順位，避免重複提交。遇到安全驗證保留視窗，交由使用者處理。需要影響隊伍的測試或重啟，先依 `AGENTS.md` 核對本輪授權。
-- 尚未選定箱子的帳號略過籤數更新。缺資料顯示「—」，只有可辨識的資料才顯示 0。保留「籤」字、大字庫存、開始綠／停止紅，以及開啟／切回共用按鈕。
-- 保留歷史事件的 `at`、`message`、`pid`、`boxId`、`boxSeq`，先記錄再清除箱號。不要將 Runtime、登入資料、Webhook 或控制台憑證放入交付或輸出。
+## 維護命令
 
-## 測試與打包
+本機開發來源使用既有 ../../Runtime/kuji-manager/venv/Scripts/python.exe；可攜來源按 README 建立 .venv。
 
-從來源目錄執行。分享版和來源啟動使用同一組測試。
+- 語法：python -m py_compile manager.py native_ui.py notifications.py desktop.py build_exe.py
+- 歷史回歸入口（本輪未跑）：python -m unittest test_manager test_login_store test_notifications test_entry_tabs test_service_runtime
+- 分享打包：python build_exe.py --share
+- 請區分來源、打包版本與實際執行服務；本次 GitHub 整理不重啟任何服務或瀏覽器。
 
-```powershell
-$kujiPython = '..\..\Runtime\kuji-manager\venv\Scripts\python.exe'
-& $kujiPython -m unittest test_manager test_login_store test_notifications test_entry_tabs test_service_runtime
-& $kujiPython build_exe.py --share
-```
-
-打包後，以新 EXE 執行 `--self-test <絕對結果檔路徑>`，確認結果中 `ok`、`frozen`、`native_ui` 為 true，分享目錄包含 EXE。交付時分別記錄測試結果、產物路徑及服務是否已套用。
-
-## 一般瀏覽器選箱掃描
-
-`browser-box-scan/` 為獨立 Chrome 擴充套件。點圖示時讀取已載入的選箱列表，依目標籤數列出結果，並比較同商品同頁的上次最大箱號。套件自行使用瀏覽器的本機儲存，無需啟動 Kuji Desk。模擬頁解析及語法檢查通過，尚未在使用者瀏覽器安裝或測試實站。
-
-v1.1.0 新增單分頁選箱刷新。由使用者開始，每分鐘一次、最多 10 分鐘。遇到驗證、入場限制、列表無法辨識或離頁即停。找到符合條件的新箱時標出原頁箱子，保留網站原本的選箱及排隊操作。模擬頁驗證刷新、停止、標示、到期及離頁；尚未安裝至實際瀏覽器。
-
-v1.1.1 改為每輪重新抽取 60–90 秒後刷新，保留單分頁、10 分鐘與各停機條件。
-
-v1.1.2 找到新箱時，若網站現有連結指向同站同商品的箱頁，直接開啟並停止刷新。無相符連結時停止並提示使用者選取，排隊保留由使用者在網站確認。模擬測試驗證開箱、拒絕不符連結與停止條件，尚未驗證實站連結格式。
-
-已用隔離 Brave 驗證 `queue-flow-demo.html`：手動／自動兩種模式、2–3 秒抖動、單次模擬排隊與停止均通過，測試頁無 HTTP 請求。此測試獨立於擴充套件與實站。
-
-v1.5.19 已打包並執行。原登入服務無帳號開窗，已切至 Firefox 版登入服務。帳號 A 的專用 Firefox 已進入實站，視窗標題先為「一番くじONLINE — Nightly」，稍後轉為「Just a moment... — Nightly」，仍待使用者確認頁面。控制台維持關閉，實站登入、監看與排隊未操作。本輪按使用者要求未跑離線測試。
+Runtime 含 Cookie、通知設定與控制台 token，只讀必要欄位。關閉／重啟會影響隊伍時先核對授權；不得分享 Runtime 或整份設定。
