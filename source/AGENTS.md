@@ -91,4 +91,6 @@
 
 - v1.5.32 通知程序使用 check_cloudflare 既有的明確 note 與同訊息事件 at 辨識驗證；按帳號與事件時間去重，不套用一般重複通知，也不再發同次 uncertain 通知。支援 v1.5.30 服務，可僅換通知程序而保留監看／Chrome。通知測試必須明示為測試，不宣稱實際發生驗證。
 
+- v1.5.35 正式移除兩項已無呼叫點的功能：login_store 登入快照（接管既有 Chrome 後，登入狀態由使用者自己的 Chrome 保存，不另存加密副本）與 Account.load_home 自動導向首頁（接管既有分頁後不得擅自導覽，避免洗掉排隊頁）。同時移除對應的 test_login_store 與 test_manager 的三項測試。若日後需要，於 becf7a9 之前的 commit 可取回。
+
 - v1.5.34 的 Discord 設定增加 cloudflare_enabled（舊設定預設 true）及 cloudflare_popup（預設 false）；後者與 DC 啟用無關，只在 GUI 開啟時輪詢提示。兩者共用 notifications.cloudflare_event_key；提示為非模態 Toplevel，不阻塞輪詢，已提示事件寫入本機 cloudflare-popups.json，不能打包或上傳。

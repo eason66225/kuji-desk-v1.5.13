@@ -21,7 +21,7 @@
 | T-004 | 跑實際測試並診斷 | 製作A | 待審（診斷完成，修復待決定） | T-006 | H-016 |
 | T-004b | 修復 test_entry_tabs 的 CDP 替身 | 製作A | 待審（已完成，6/6 通過） | T-004 | H-017 |
 | T-004d | 處理 6 項「測試目的已失效」的測試 | 製作A | 待辦（需人類決定去留） | T-004b | H-017 |
-| T-010 | 確認 load_home 與 login_store 是否為死程式碼並決定去留 | 人類 | 待辦 | T-004b | H-017 |
+| T-010 | 移除 load_home 與 login_store 死程式碼 | 製作A | 待審 | T-004b | H-018 |
 | T-004c | 釐清 3 項行為差異是測試過時或程式回歸 | 製作A | 待辦（需人類確認預期行為） | T-004 | H-016 |
 | T-009 | 複核並調整綠／紅按鈕文字色（人類指定由設計B 負責） | 設計B | 待辦 | T-007 | H-016 |
 | T-008 | 紀錄 ID 改用角色前綴避免撞號 | 人類 | 待辦 | — | H-010 |
@@ -396,4 +396,24 @@
 - 需要對方做什麼：
   - 人類：`load_home` 與 `login_store` 是真的要廢棄，還是功能遺漏？這會決定 6 項測試與可能的程式碼清理（T-010）。
   - 人類：是否授權我改寫上表中 3 項「架構已變」的測試（T-004d）。
+- 狀態：待審
+
+### H-018 ｜ 2026-11-26 05:45 ｜ 寄件：製作A → 收件：人類
+- 類型：交付
+- 任務：T-010
+- 引用：H-017
+- 內容：
+  - 人類確認「用不到這些功能了」，並核准執行刪除。
+  - **已移除登入快照**：`source/login_store.py`（65 行）、`source/test_login_store.py`（43 行／4 測試）、`manager.py` 的 `import login_store`、`test_manager.test_open_cookie_context_closed_can_reopen`。理由：改為 CDP 接管既有 Chrome 後，登入狀態由使用者自己的 Chrome 保存，不需另存加密副本。
+  - **已移除自動導向首頁**：`manager.Account.load_home()`（19 行）、`test_open_home_timeout_keeps_browser`、`test_open_home_aborted_preserves_window_in_both_modes`。理由：接管既有分頁後不應擅自導覽，避免洗掉使用者正在排隊的頁面。
+  - 刪除前查核：`build_exe.py`、`desktop.py`、`service_runtime.py`、`native_ui.py` 皆未引用；全專案無任何呼叫點。刪除後再次全文搜尋 `login_store`／`load_home`，結果為零。
+  - `SOURCE-SHA256.json` 移除兩個檔案條目並重算，由 40 檔變 **38 檔**，核對相符，CRLF 格式維持。
+  - 兩份 `AGENTS.md` 均補上版本紀錄，載明這是刻意廢棄而非遺漏，並註明可從 `becf7a9` 之前的 commit 取回。
+  - **測試基線：69 項中 62 通過、7 有問題**（刪除前為 76 項中 62 通過、14 問題）。通過數不變，代表刪掉的全是已失效的測試，沒有損及任何有效覆蓋。
+  - 未重新打包 EXE，未重啟服務，未操作瀏覽器或隊伍。
+- 改動檔案：
+  - 刪除：`source/login_store.py`、`source/test_login_store.py`
+  - 修改：`source/manager.py`、`source/test_manager.py`、`source/AGENTS.md`、`AGENTS.md`、`SOURCE-SHA256.json`、`HANDOFF.md`
+- 需要對方做什麼：
+  - 人類：剩餘 7 項的處理方式，見下一則說明（3 項行為差異、3 項架構已變、1 項需 Windows 實機）。
 - 狀態：待審

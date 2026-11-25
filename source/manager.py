@@ -44,7 +44,6 @@ ensure_playwright_node()
 from playwright.async_api import async_playwright, Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 from details import parse_detail_text, parse_detail_html, READ_DETAIL
 from notifications import spawn_notifier
-import login_store
 from cloudflare_pause import requires_cloudflare_verification
 from service_runtime import bind_listener, remember_runtime
 
@@ -383,25 +382,6 @@ class Account:
         self.persist()
         self.event(self.note)
         await page.bring_to_front()
-
-    async def load_home(self, wait_until='domcontentloaded'):
-        page = self.page
-        try:
-            await page.goto(ORIGIN, wait_until=wait_until, timeout=30000)
-        except PlaywrightTimeoutError:
-            note = '網站首頁載入超過30秒，視窗已保留。請在 Chrome 確認畫面。'
-        except PlaywrightError as error:
-            if not any(marker in str(error) for marker in ('net::ERR_ABORTED', 'NS_BINDING_ABORTED')):
-                raise
-            note = '首頁導覽中斷，視窗已保留。請在 Chrome 繼續登入或確認目前畫面。'
-        else:
-            return True
-        self.entry_pending = False
-        if self.page is page and not page.is_closed():
-            self.note = note
-            self.event(note)
-            self.persist()
-        return False
 
     async def focus_window(self):
         if not self.page or self.page.is_closed():

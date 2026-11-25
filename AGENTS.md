@@ -244,3 +244,4 @@
 | 2026-11-25 | 製作A | 建立三方協作總則，合併既有專案維護規範（原根目錄 AGENTS.md 內容全數保留於第 5 節） |
 | 2026-11-25 | 製作A | 新增第 9 節程式精簡原則（Ponytail，MIT，改寫自 DietrichGebert/ponytail），原版本紀錄改為第 10 節 |
 | 2026-11-25 | 製作A | 人類決定不採用 Vercel / Firebase，部署欄定案為純本機 + GitHub Release |
+| 2026-11-26 | 製作A | 人類確認 login_store 登入快照與 load_home 自動導向首頁已不再需要，連同 7 項對應測試一併移除 |

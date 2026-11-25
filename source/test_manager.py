@@ -212,19 +212,6 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         a.on_context_closed(old)
         self.assertIs(a.context,new)
 
-    async def test_open_cookie_context_closed_can_reopen(self):
-        from playwright.async_api import Error as PlaywrightError
-        a=self.a;a.phase='closed';a.page=None
-        context=Mock(cookies=AsyncMock(side_effect=PlaywrightError('Target closed')),close=AsyncMock())
-        a.context=context
-        with self.assertRaisesRegex(ValueError,'Chrome'):
-            await a.open(CONFIG)
-        self.assertIsNone(a.context)
-        self.assertIsNone(a.page)
-        self.assertFalse(a.entry_pending)
-        self.assertEqual(a.phase,'closed')
-        context.close.assert_awaited_once()
-
     async def test_open_uses_visible_chrome_and_separate_account_profile(self):
         a = self.a
         page = Mock(url=URL, goto=AsyncMock(), content=AsyncMock(return_value='<body>首頁</body>'))
@@ -237,36 +224,6 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs['channel'], 'chrome')
         self.assertFalse(kwargs['headless'])
         self.assertIs(a.page, page)
-
-    async def test_open_home_timeout_keeps_browser(self):
-        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-        a=self.a;a.phase='closed';a.page=None
-        page=Mock(is_closed=Mock(return_value=False),goto=AsyncMock(side_effect=PlaywrightTimeoutError('slow')))
-        a.context=Mock(pages=[page],cookies=AsyncMock(return_value=[]))
-        await a.open(CONFIG)
-        self.assertIs(a.page,page)
-        self.assertEqual(a.phase,'idle')
-        self.assertFalse(a.entry_pending)
-        self.assertIn('30',a.note)
-
-    async def test_open_home_aborted_preserves_window_in_both_modes(self):
-        from playwright.async_api import Error as PlaywrightError
-        for login_only in (True, False):
-            with self.subTest(login_only=login_only):
-                a = Account(self.m, 'B')
-                a.phase = 'closed'
-                self.m.login_only = login_only
-                page = Mock(url='about:blank', goto=AsyncMock(side_effect=PlaywrightError('Page.goto: net::ERR_ABORTED')),
-                            is_closed=Mock(return_value=False))
-                a.context = Mock(pages=[page], cookies=AsyncMock(return_value=[]))
-                await a.open(CONFIG)
-                self.assertIs(a.page, page)
-                self.assertEqual(a.phase, 'idle')
-                self.assertFalse(a.entry_pending)
-                self.assertIsNone(a.task)
-                self.assertIn('首頁導覽中斷', a.state()['note'])
-                page.goto.assert_awaited_once_with('https://on-line.1kuji.com',
-                    wait_until='commit' if login_only else 'domcontentloaded', timeout=30000)
 
     async def test_cancel_observer_interrupts_blocked_page_read(self):
         a=self.a
