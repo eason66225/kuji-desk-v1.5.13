@@ -19,7 +19,9 @@
 | T-006 | 套用 ui-strings.md 的建議到 source/，統一命名 | 製作A | 待審 | T-003 | H-014 |
 | T-007 | 套用 design/T-002 的按鈕對比度修正 | 製作A | 待審 | T-002 | H-015 |
 | T-004 | 跑實際測試並診斷 | 製作A | 待審（診斷完成，修復待決定） | T-006 | H-016 |
-| T-004b | 修復過時測試契約（entry_tabs CDP 架構等） | 製作A | 待辦（需人類指示） | T-004 | H-016 |
+| T-004b | 修復 test_entry_tabs 的 CDP 替身 | 製作A | 待審（已完成，6/6 通過） | T-004 | H-017 |
+| T-004d | 處理 6 項「測試目的已失效」的測試 | 製作A | 待辦（需人類決定去留） | T-004b | H-017 |
+| T-010 | 確認 load_home 與 login_store 是否為死程式碼並決定去留 | 人類 | 待辦 | T-004b | H-017 |
 | T-004c | 釐清 3 項行為差異是測試過時或程式回歸 | 製作A | 待辦（需人類確認預期行為） | T-004 | H-016 |
 | T-009 | 複核並調整綠／紅按鈕文字色（人類指定由設計B 負責） | 設計B | 待辦 | T-007 | H-016 |
 | T-008 | 紀錄 ID 改用角色前綴避免撞號 | 人類 | 待辦 | — | H-010 |
@@ -356,4 +358,42 @@
   - 人類：是否要我執行 T-004b，修復第 2 類的 9 項過時 mock。
   - 人類：環境限制的 4 項需在 Windows 實機執行才有意義。
   - 設計B：T-009，複核 `ON_ACCENT='#10151c'` 於 `#38a169` 綠底與 `#e05252` 紅底上的表現，必要時提替代值。只改 `/design`，不要改 `source/`。
+- 狀態：待審
+
+### H-017 ｜ 2026-11-26 05:45 ｜ 寄件：製作A → 收件：人類
+- 類型：交付
+- 任務：T-004b
+- 引用：H-016
+- 內容：
+  - **先更正 H-016 的數字**：該筆寫「60 通過、16 問題」為誤。重新核對後，修復前實際為 **58 通過、18 問題**（我把類別數加錯，且其中 2 項「失敗」是我執行時用錯測試類別名稱所致，那 2 項本來就是好的）。
+  - **已修復 `test_entry_tabs`，6/6 全通過。** 最大的收穫是整組測試現在跑得完——先前 `test_cancellation_closes_extras_and_keeps_original` 會永久卡住，導致任何人執行完整回歸都會掛住，這是這套測試長期沒人跑的直接原因。
+  - 修法：依 v1.5.26 的實際架構重寫替身。新增 `FakeCDPSession` 模擬 `Target.getTargetInfo` 與 `Runtime.evaluate`，並以 `spawn()` 模擬 `window.open` 產生分頁。原本的替身只提供 `context.new_page`，而 AGENTS.md v1.5.24／v1.5.26 已明文禁止該做法。**所有測試的驗證目的與斷言一律保留**，僅把「開分頁數」的斷言從 `new_page.await_count` 改為實際開出的分頁數。
+  - 目前基線：**76 項中 62 通過、14 有問題**（3 行為差異 + 11 錯誤）。
+
+  **調查中發現三處疑似死程式碼，這是比測試本身更重要的發現**
+
+  1. `manager.py:387` 的 `load_home()` **定義後無任何呼叫**，全專案搜尋只有定義本身。
+  2. `manager.py:47` `import login_store`，但 `login_store` 的四個函式（`protect`／`site_cookies`／`save`／`restore`）**在產品程式中完全沒有被使用**。
+  3. `context.cookies()` 在 `manager.py` 中**沒有任何呼叫**。
+  - 三者互相印證：登入快照（把 cookie 加密存檔）這項功能已不在現行流程中。這也解釋了為何 `test_login_store` 的 3 項需要 Windows DPAPI——它們測的是一個已經沒有被接上的模組。我先前把這 3 項歸為「環境限制」並不完整。
+
+  **剩下 14 項的分類與建議（均未修改，等你決定）**
+
+  | 測試 | 狀況 | 我的建議 |
+  |---|---|---|
+  | `test_open_home_timeout_keeps_browser` | 驗證 `load_home` 的逾時處理，但 `open()` 已不呼叫它 | 連同死程式碼一起決定去留 |
+  | `test_open_home_aborted_preserves_window_in_both_modes` | 同上（2 個子測試） | 同上 |
+  | `test_open_cookie_context_closed_can_reopen` | 驗證 cookie 還原失敗的處理，但已無 `cookies()` 呼叫 | 同上 |
+  | `test_open_uses_visible_chrome_and_separate_account_profile` | 驗證 v1.5.23 的 `launch_persistent_context` 與獨立設定檔，v1.5.24 起已改 CDP 接管 | 改寫為驗證 `connect_over_cdp('chrome', timeout=60000)` |
+  | `test_query_inventory_api_parses_html_and_sets_inventory` | 使用 `FakeSession`（aiohttp），v1.5.22 起已改頁內 fetch | 改寫為以 `page.evaluate` 為基礎 |
+  | `test_soldout_resume_runs_once_and_respects_switch` | 呼叫已不存在的 `Account.schedule_soldout_resume` | 改寫為對應現行的 `resume_after_soldout` |
+  | `test_login_store`（3 項） | 測試未被接上的模組，且需 Windows DPAPI | 視 login_store 去留而定 |
+  | `test_service_runtime`（1 項） | 需 tkinter，Linux 容器無法安裝 | 保留，在 Windows 實機跑 |
+  | 行為差異 3 項 | 見 H-016 | 仍待確認預期行為 |
+- 改動檔案：
+  - `source/test_entry_tabs.py`（重寫替身、1 處斷言）
+  - `SOURCE-SHA256.json`、`HANDOFF.md`
+- 需要對方做什麼：
+  - 人類：`load_home` 與 `login_store` 是真的要廢棄，還是功能遺漏？這會決定 6 項測試與可能的程式碼清理（T-010）。
+  - 人類：是否授權我改寫上表中 3 項「架構已變」的測試（T-004d）。
 - 狀態：待審

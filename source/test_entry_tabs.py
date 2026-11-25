@@ -7,6 +7,31 @@ from unittest.mock import AsyncMock, Mock, patch
 from manager import CloudflarePaused, Manager
 
 
+class FakeCDPSession:
+    """模擬 CDP session。v1.5.26 起入場分頁改由原頁 window.open 開啟，
+    不再使用 context.new_page，因此測試必須在這一層做替身。"""
+
+    def __init__(self, harness, page):
+        self.harness = harness
+        self.page = page
+        self.detached = False
+
+    async def send(self, method, params=None):
+        if method == 'Target.getTargetInfo':
+            return {'targetInfo': {'browserContextId': self.harness.a.profile_context_id,
+                                   'targetId': id(self.page)}}
+        if method == 'Runtime.evaluate':
+            marker = params['expression'].split('"')[1]
+            self.harness.spawn(marker)
+            return {'result': {'value': True}}
+        if method == 'Target.getTargets':
+            return {'targetInfos': []}
+        return {}
+
+    async def detach(self):
+        self.detached = True
+
+
 class EntryTabsTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -17,8 +42,28 @@ class EntryTabsTests(unittest.IsolatedAsyncioTestCase):
         self.extras = [self.page() for _ in range(4)]
         self.manual = self.page()
         self.a.page = self.original
-        self.a.context = Mock(new_page=AsyncMock(side_effect=self.extras))
-        self.a.navigate_entry_page = AsyncMock()
+
+        # 透過 CDP window.open 產生的分頁，依序取自 self.extras
+        self.pending = list(self.extras)
+        self.opened = []
+        self.intended = {}
+        self.a.context = Mock(pages=[self.original, self.manual],
+                              new_cdp_session=AsyncMock(
+                                  side_effect=lambda page: FakeCDPSession(self, page)))
+        self.manager.attached_browser = Mock(contexts=[self.a.context])
+
+        async def navigate(page, source=None):
+            # 真實流程由導覽把分頁帶到入場網址；這裡還原標記前的網址
+            page.url = self.intended.get(id(page), self.url)
+        self.a.navigate_entry_page = AsyncMock(side_effect=navigate)
+
+    def spawn(self, marker):
+        """模擬 window.open：取下一個預備分頁，暫時掛上 marker 網址供程式辨識。"""
+        page = self.pending.pop(0)
+        self.intended[id(page)] = page.url
+        page.url = marker
+        self.a.context.pages.append(page)
+        self.opened.append(page)
 
     def page(self):
         return Mock(url=self.url, close=AsyncMock(), on=Mock(), remove_listener=Mock())
@@ -33,7 +78,7 @@ class EntryTabsTests(unittest.IsolatedAsyncioTestCase):
         self.a.wait_temporary_page = AsyncMock(side_effect=wait)
         await self.a.wait_entry_tabs()
         self.assertIs(self.a.page, self.extras[0])
-        self.assertEqual(self.a.context.new_page.await_count, 4)
+        self.assertEqual(len(self.opened), 4)
         self.extras[0].close.assert_not_awaited()
         self.original.close.assert_awaited_once()
         for page in self.extras[1:]:page.close.assert_awaited_once()
