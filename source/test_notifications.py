@@ -50,7 +50,7 @@ class NotificationTests(unittest.IsolatedAsyncioTestCase):
             with patch('notifications.send_webhook', new=AsyncMock(side_effect=mock_send)), patch('notifications.asyncio.sleep', new=AsyncMock()):
                 await worker.process([account], config, None)
                 self.assertEqual(len(sent_payloads), 1)
-                self.assertIn('已通過入場限制', sent_payloads[0]['embeds'][0]['title'])
+                self.assertIn('可進入商品／籤箱頁', sent_payloads[0]['embeds'][0]['title'])
                 # Deduplication check with same entryPassedAt
                 await worker.process([account], config, None)
                 self.assertEqual(len(sent_payloads), 1)

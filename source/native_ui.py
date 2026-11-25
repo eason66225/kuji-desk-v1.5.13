@@ -18,6 +18,9 @@ VERSION='1.5.30'
 UI_VERSION='1.5.34'
 BG='#10151c'; PANEL='#18212c'; TEXT='#eef3f8'; MUTED='#a0aec0'; LIME='#d7f896'
 RED='#e05252'; GREEN='#38a169'
+# T-007: 綠／紅底按鈕的文字色。白字對比僅 3.25:1／3.82:1，低於 WCAG AA 4.5:1；
+# 改用此深色後分別約 5.65:1／4.80:1。
+ON_ACCENT='#10151c'
 COLORS={'A':'#8bb9ff','B':'#d7f896','C':'#ffbe84'}
 
 
@@ -204,7 +207,7 @@ class NativeUI:
         self.label(header,'三個帳號 · 獨立 Windows 視窗',color=MUTED).pack(side='left',padx=20)
         self.button(header,'執行紀錄',self.show_logs).pack(side='right',padx=4)
         self.button(header,'重新啟動服務',self.restart_service).pack(side='right')
-        self.btn_control = self.button(header,'開啟背景服務',self.toggle_control,bg=GREEN,fg='#ffffff')
+        self.btn_control = self.button(header,'開啟背景服務',self.toggle_control,bg=GREEN,fg=ON_ACCENT)
         self.btn_control.pack(side='right',padx=8)
         self.button(header,'🔔 DC Webhook 設定',self.discord_settings,bg='#2b3d52',fg='#ffffff').pack(side='right')
         self.label(self.root,var=self.connection,color=MUTED,anchor='w').pack(fill='x',padx=24)
@@ -219,8 +222,8 @@ class NativeUI:
         settings.columnconfigure(0,weight=1)
         tk.Checkbutton(settings,text='箱子售完後自動找新箱',variable=self.auto,bg=PANEL,fg=TEXT,
                        selectcolor=BG,activebackground=PANEL,activeforeground=TEXT).grid(row=2,column=0,sticky='w',pady=(8,0))
-        self.button(settings,'停止全部監看',lambda:self.batch('stop'),bg=RED,fg='#ffffff').grid(row=2,column=1,columnspan=2,pady=(8,0))
-        self.button(settings,'一起開始監看',lambda:self.batch('start'),bg=GREEN,fg='#ffffff').grid(row=2,column=3,pady=(8,0))
+        self.button(settings,'停止全部監看',lambda:self.batch('stop'),bg=RED,fg=ON_ACCENT).grid(row=2,column=1,columnspan=2,pady=(8,0))
+        self.button(settings,'一起開始監看',lambda:self.batch('start'),bg=GREEN,fg=ON_ACCENT).grid(row=2,column=3,pady=(8,0))
         tk.Checkbutton(settings,text='啟用入場重新整理功能',variable=self.entry_refresh,bg=PANEL,fg=TEXT,
                        selectcolor=BG,activebackground=PANEL,activeforeground=TEXT).grid(row=3,column=0,sticky='w',pady=(4,0))
         tk.Checkbutton(settings,text='每 3 分鐘自動重新讀取全部籤數',variable=self.auto_refresh_inv,bg=PANEL,fg=TEXT,
@@ -458,7 +461,7 @@ class NativeUI:
             self.submit('discord-test', send)
 
         self.button(actions, '發送測試通知', test).pack(side='left')
-        self.button(actions, '儲存設定', save, primary=True, bg=GREEN, fg='#ffffff').pack(side='right')
+        self.button(actions, '儲存設定', save, primary=True, bg=GREEN, fg=ON_ACCENT).pack(side='right')
         self.button(actions, '取消', dialog.destroy).pack(side='right', padx=8)
 
     def submit(self,key,function):
@@ -544,8 +547,8 @@ class NativeUI:
         self.control_active = not login_only
         color = GREEN if login_only else RED
         self.btn_control.config(text='開啟背景服務' if login_only else '關閉背景服務',
-                                bg=color, fg='#ffffff', activebackground=color, activeforeground='#ffffff')
-        status='已連線' if version==VERSION else '舊版服務正在執行，請按右上「重新啟動服務」套用修正'
+                                bg=color, fg=ON_ACCENT, activebackground=color, activeforeground=ON_ACCENT)
+        status='已連線' if version==VERSION else '舊版背景服務正在執行，請按右上角「重新啟動服務」套用新版。'
         try:
             dc=json.loads((self.runtime/'discord-status.json').read_text(encoding='utf-8'))
             discord='DC 通知已連接' if dc.get('enabled') and dc.get('connected') else 'DC 通知未連接'
@@ -595,9 +598,9 @@ class NativeUI:
             c['buttons']['monitor'].config(
                 text='停止監看' if is_monitoring else '開始監看',
                 bg=RED if is_monitoring else GREEN,
-                fg='#ffffff',
+                fg=ON_ACCENT,
                 activebackground=RED if is_monitoring else GREEN,
-                activeforeground='#ffffff',
+                activeforeground=ON_ACCENT,
                 font=('Microsoft JhengHei UI',10,'bold')
             )
             c['buttons']['open'].config(text='切回視窗' if a.get('opened') else '連接 Chrome')
