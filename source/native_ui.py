@@ -41,7 +41,7 @@ class Client:
             raise ValueError(message) from None
         except TimeoutError:
             action=(data or {}).get('action',path)
-            raise ValueError(f'本機總控等候逾時（{action}）；操作結果尚未確認，請看執行紀錄，勿重複提交。') from None
+            raise ValueError(f'背景服務等候逾時（{action}）；操作結果尚未確認，請查看執行紀錄，勿重複操作。') from None
 
     def alive(self):
         try:return self.call(timeout=2)
@@ -68,7 +68,7 @@ class Client:
                         break
                     time.sleep(.25)
                 else:
-                    raise ValueError('本機服務未成功啟動，請查看 Runtime 的 native-server.log。')
+                    raise ValueError('背景服務未成功啟動，請查看 Runtime 的 native-server.log。')
             if current.get('loginOnly') and not login_only:
                 self.call('control', {'action':'resume'})
 
@@ -98,7 +98,7 @@ class Client:
         command=str(process.get('Command','')).lower().replace('\\','/')
         own_command=('kuji-manager/manager.py' in command or 'kujidesk.exe' in command)
         if process.get('Pid')!=pid or pid not in process.get('Owners',[]) or not own_command:
-            raise ValueError('無法核對舊總控的程序身分，未強制終止。')
+            raise ValueError('無法確認舊版背景服務的程序身分，未強制關閉。')
         subprocess.run(['taskkill.exe','/PID',str(pid),'/T','/F'],check=True,
                        stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=flags)
 
@@ -121,7 +121,7 @@ class NativeUI:
             self.cloudflare_popups=json.loads((self.runtime/'cloudflare-popups.json').read_text(encoding='utf-8'))
         except (OSError,ValueError):
             self.cloudflare_popups={}
-        self.connection=tk.StringVar(value='正在連接本機服務…')
+        self.connection=tk.StringVar(value='正在連接背景服務…')
         self.notice=tk.StringVar(value='關閉此視窗不會自動退出網站隊伍。')
         self.url=tk.StringVar(value='https://on-line.1kuji.com/Form/Product/SelectBox.aspx?pid=sap_0000008694&pno=1')
         self.count=tk.StringVar(value='70');self.low=tk.StringVar(value='2.2');self.high=tk.StringVar(value='4.5')
@@ -193,7 +193,7 @@ class NativeUI:
         tools_menu = tk.Menu(menubar, tearoff=0)
         tools_menu.add_command(label='執行紀錄', command=self.show_logs)
         tools_menu.add_command(label='🔄 重新整理介面 (F5)', command=self.reload_gui)
-        tools_menu.add_command(label='⚡ 開啟／關閉控制台', command=self.toggle_control)
+        tools_menu.add_command(label='⚡ 開啟／關閉背景服務', command=self.toggle_control)
         tools_menu.add_command(label='🔁 重新啟動背景服務', command=self.restart_service)
         menubar.add_cascade(label='工具 (T)', menu=tools_menu)
         self.root.config(menu=menubar)
@@ -204,7 +204,7 @@ class NativeUI:
         self.label(header,'三個帳號 · 獨立 Windows 視窗',color=MUTED).pack(side='left',padx=20)
         self.button(header,'執行紀錄',self.show_logs).pack(side='right',padx=4)
         self.button(header,'重新啟動服務',self.restart_service).pack(side='right')
-        self.btn_control = self.button(header,'開啟控制台',self.toggle_control,bg=GREEN,fg='#ffffff')
+        self.btn_control = self.button(header,'開啟背景服務',self.toggle_control,bg=GREEN,fg='#ffffff')
         self.btn_control.pack(side='right',padx=8)
         self.button(header,'🔔 DC Webhook 設定',self.discord_settings,bg='#2b3d52',fg='#ffffff').pack(side='right')
         self.label(self.root,var=self.connection,color=MUTED,anchor='w').pack(fill='x',padx=24)
@@ -223,7 +223,7 @@ class NativeUI:
         self.button(settings,'一起開始監看',lambda:self.batch('start'),bg=GREEN,fg='#ffffff').grid(row=2,column=3,pady=(8,0))
         tk.Checkbutton(settings,text='啟用入場重新整理功能',variable=self.entry_refresh,bg=PANEL,fg=TEXT,
                        selectcolor=BG,activebackground=PANEL,activeforeground=TEXT).grid(row=3,column=0,sticky='w',pady=(4,0))
-        tk.Checkbutton(settings,text='每 3 分鐘自動以 API 更新全部籤數',variable=self.auto_refresh_inv,bg=PANEL,fg=TEXT,
+        tk.Checkbutton(settings,text='每 3 分鐘自動重新讀取全部籤數',variable=self.auto_refresh_inv,bg=PANEL,fg=TEXT,
                        selectcolor=BG,activebackground=PANEL,activeforeground=TEXT).grid(row=4,column=0,sticky='w',pady=(4,0))
         self.button(settings,'更新全部籤數',lambda:self.batch('api_inventory')).grid(
             row=4,column=1,columnspan=2,padx=8,pady=(4,0))
@@ -373,9 +373,9 @@ class NativeUI:
         events_frame = tk.LabelFrame(body, text=' 通知事件 ', bg=PANEL, fg=MUTED, font=('Microsoft JhengHei UI', 10), padx=12, pady=8)
         events_frame.pack(fill='x', pady=8)
 
-        tk.Checkbutton(events_frame, text='輪到抽籤時通知（輪到你了！）', variable=ready, bg=PANEL, fg=TEXT, selectcolor=BG,
+        tk.Checkbutton(events_frame, text='輪到你進入頁面時通知（輪到你了！）', variable=ready, bg=PANEL, fg=TEXT, selectcolor=BG,
                        activebackground=PANEL, activeforeground=TEXT, font=('Microsoft JhengHei UI', 10)).pack(anchor='w', pady=2)
-        tk.Checkbutton(events_frame, text='通過入場限制（進入商品頁／籤箱頁）時通知', variable=entry_passed, bg=PANEL, fg=TEXT, selectcolor=BG,
+        tk.Checkbutton(events_frame, text='網站開放進入商品頁／籤箱頁時通知', variable=entry_passed, bg=PANEL, fg=TEXT, selectcolor=BG,
                        activebackground=PANEL, activeforeground=TEXT, font=('Microsoft JhengHei UI', 10)).pack(anchor='w', pady=2)
         tk.Checkbutton(events_frame, text='籤筒抽完（售完）時通知', variable=sold_out, bg=PANEL, fg=TEXT, selectcolor=BG,
                        activebackground=PANEL, activeforeground=TEXT, font=('Microsoft JhengHei UI', 10)).pack(anchor='w', pady=2)
@@ -383,7 +383,7 @@ class NativeUI:
                        activebackground=PANEL, activeforeground=TEXT, font=('Microsoft JhengHei UI', 10)).pack(anchor='w', pady=2)
         tk.Checkbutton(events_frame, text='出現 Cloudflare 真人驗證時發送 DC 通知（同次只通知一次）', variable=cloudflare, bg=PANEL, fg=TEXT, selectcolor=BG,
                        activebackground=PANEL, activeforeground=TEXT, font=('Microsoft JhengHei UI', 10)).pack(anchor='w', pady=2)
-        tk.Checkbutton(events_frame, text='出現 Cloudflare 驗證時彈出提示視窗（需開著總控視窗）', variable=cloudflare_popup, bg=PANEL, fg=TEXT, selectcolor=BG,
+        tk.Checkbutton(events_frame, text='出現 Cloudflare 真人驗證時彈出提示視窗（需保持 Kuji Desk 主視窗開啟）', variable=cloudflare_popup, bg=PANEL, fg=TEXT, selectcolor=BG,
                        activebackground=PANEL, activeforeground=TEXT, font=('Microsoft JhengHei UI', 10)).pack(anchor='w', pady=2)
 
         ahead_row = tk.Frame(events_frame, bg=PANEL)
@@ -531,7 +531,7 @@ class NativeUI:
         dialog.configure(bg=PANEL)
         self.label(dialog,'需要驗證的帳號：'+ '、'.join(labels),size=13,bold=True,
                    wraplength=460).pack(padx=24,pady=(24,12))
-        self.label(dialog,'自動操作已暫停。請切回該帳號的 Chrome 手動完成驗證，再啟動監看。',
+        self.label(dialog,'自動監看已暫停。請切回該帳號的 Chrome 視窗，由你手動完成驗證後，再重新啟動監看。',
                    wraplength=460).pack(padx=24,pady=(0,20))
         self.button(dialog,'知道了',dialog.destroy,True).pack(padx=24,pady=(0,24))
         dialog.lift()
@@ -543,7 +543,7 @@ class NativeUI:
         login_only = state.get('loginOnly', False)
         self.control_active = not login_only
         color = GREEN if login_only else RED
-        self.btn_control.config(text='開啟控制台' if login_only else '關閉控制台',
+        self.btn_control.config(text='開啟背景服務' if login_only else '關閉背景服務',
                                 bg=color, fg='#ffffff', activebackground=color, activeforeground='#ffffff')
         status='已連線' if version==VERSION else '舊版服務正在執行，請按右上「重新啟動服務」套用修正'
         try:
@@ -552,7 +552,7 @@ class NativeUI:
         except (OSError,ValueError):discord='DC 通知未設定'
         connection = f'服務 v{version}：{status}　｜　{discord}'
         if login_only:
-            connection = '控制台已關閉，可開啟專用視窗手動登入。'
+            connection = '背景服務已關閉。請先重新開啟服務，或自行開啟 Chrome 視窗手動登入。'
             if version not in {'?', VERSION}:
                 connection += ' 登入服務有新版，請按「重新啟動服務」套用。'
         self.connection.set(f'獨立介面 v{UI_VERSION}　｜　{connection}')
@@ -658,7 +658,7 @@ class NativeUI:
                 self.client.ensure_server(login_only=True)
                 current = self.client.alive()
                 if not current or current.get('version') != VERSION:
-                    raise ValueError('請先在新版總控重新啟動服務，套用設定檔綁定修正。')
+                    raise ValueError('請先按「重新啟動服務」切換至新版背景服務，再進行設定檔綁定。')
                 return self.client.call('action',data,timeout=190)
             dialog.destroy()
             self.submit(ident,connect)
@@ -690,7 +690,7 @@ class NativeUI:
             self.rename(ident)
             return
         if self.service_version != VERSION and action in {'requeue','inspect','restart','navigate','api_inventory'}:
-            messagebox.showinfo('套用修正','目前背景服務仍是舊版。請先按右上「重新啟動服務」套用修正；可能中斷目前隊伍。',parent=self.root)
+            messagebox.showinfo('套用新版','目前背景服務仍是舊版。請先按右上角「重新啟動服務」套用新版；重啟可能中斷目前隊伍，請於重啟後自行確認。',parent=self.root)
             return
         confirms={'requeue':'會依目前視窗退出或返回列表，放棄原順位，再開始找新滿箱。只影響此帳號。',
                   'restart':'會中止此帳號的助手任務，再重新連接目前 Chrome。請重新確認網站隊伍。',
@@ -717,7 +717,7 @@ class NativeUI:
             for ident,a in self.accounts.items():
                 if a.get('canRefresh') and a.get('phase') not in {'watching','opening','leaving'} and ident not in self.busy:
                     selected.append(ident);self.act(ident,'api_inventory')
-            self.notice.set('正在以 API 查詢帳號：'+ '、'.join(selected) if selected else '尚未選定箱子的帳號已略過，監看繼續。')
+            self.notice.set('正在重新讀取帳號籤數：'+ '、'.join(selected) if selected else '尚未選定箱子的帳號已略過，監看繼續。')
             return
         key={'start':'canStart','stop':'canStop','inventory':'canRefresh'}[action]
         selected=[]
@@ -730,9 +730,9 @@ class NativeUI:
     def restart_service(self):
         current = self.client.alive()
         if not current:
-            self.notice.set('目前沒有本機服務需要重新啟動。')
+            self.notice.set('目前沒有背景服務需要重新啟動。')
             return
-        if messagebox.askyesno('重新啟動整體服務','這會套用新版修正並重啟總控。三個專用視窗可能關閉、隊伍可能中斷；登入與設定會保留。要繼續嗎？',parent=self.root):
+        if messagebox.askyesno('重新啟動整體服務','這會重新啟動背景服務以套用新版。三個獨立視窗可能會關閉、網站隊伍也可能中斷（帳號登入與設定會保留），重啟後請由你親自確認隊伍狀態。要繼續嗎？',parent=self.root):
             self.submit('service',self.client.restart_server)
             self.notice.set('正在重新啟動服務，請稍候…')
 
@@ -747,7 +747,7 @@ class NativeUI:
             return
         dialog = tk.Toplevel(self.root)
         self.log_window = dialog
-        dialog.title('搶箱與排隊執行紀錄')
+        dialog.title('監看與排隊執行紀錄')
         dialog.geometry('1000x560')
         dialog.configure(bg=PANEL)
         self.label(dialog, '選擇籤筒查看歷史 · 每頁最近 500 筆 · 自動更新', color=MUTED).pack(anchor='w',padx=12,pady=10)
@@ -829,7 +829,7 @@ class NativeUI:
     def toggle_control(self):
         alive = self.client.alive()
         if alive and not alive.get('loginOnly'):
-            if messagebox.askyesno('關閉控制台', '確定要關閉控制台服務嗎？\n專用視窗與隊伍連線將會中斷，登入與設定會完整保留。', parent=self.root):
+            if messagebox.askyesno('關閉背景服務', '確定要關閉背景服務嗎？\n獨立視窗與網站隊伍連線將會中斷，帳號登入與設定會保留。', parent=self.root):
                 try:
                     self.client.call('control', {'action': 'shutdown', 'confirmed': True})
                 except Exception:
@@ -837,14 +837,14 @@ class NativeUI:
                         self.client.stop_legacy_server()
                     except Exception:
                         pass
-                self.notice.set('正在關閉控制台服務…')
+                self.notice.set('正在關閉背景服務…')
                 self.render({'loginOnly':True, 'accounts':[]})
         else:
-            self.notice.set('正在啟動控制台服務…')
+            self.notice.set('正在啟動背景服務…')
             def start_srv():
                 try:
                     self.client.ensure_server()
-                    self.notice.set('控制台服務已啟動。')
+                    self.notice.set('背景服務已啟動。')
                 except Exception as e:
                     self.notice.set(f'啟動失敗：{e}')
             self.submit('service', start_srv)

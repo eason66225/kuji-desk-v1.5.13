@@ -167,7 +167,7 @@ class Account:
         self.http_session: 'aiohttp.ClientSession | None' = None
         self.user_id: 'str | None' = None
         self.lock = asyncio.Lock()
-        self.phase, self.note = 'closed', '開啟專用視窗後，手動登入此帳號。'
+        self.phase, self.note = 'closed', '開啟獨立視窗後，手動登入此帳號。'
         self.config, self.target, self.metrics = {}, None, {}
         self.queue_no = None
         self.soldout_task = None
@@ -227,7 +227,7 @@ class Account:
             phase = 'idle' if opened else 'closed'
             return {'id':self.id, 'label':self.label, 'phase':phase,
                     'phaseLabel':'僅供登入' if opened else LABELS[phase], 'opened':opened,
-                    'note':self.note if opened and self.phase == 'idle' else '控制台已關閉，可手動登入專用視窗。',
+                    'note':self.note if opened and self.phase == 'idle' else '背景服務已關閉，可手動登入獨立視窗。',
                     'events':self.events[-500:]}
         if opened and not self.cloudflare_paused and self.phase == 'uncertain' and (not self.task or self.task.done()) and not getattr(self, '_healing', False):
             self._healing = True
@@ -260,7 +260,7 @@ class Account:
             raise ValueError('另一張帳號卡片正在綁定，請稍候。')
         directory = directory or (None if choose else self.chrome_profile_directory)
         if not isinstance(directory, str) or not directory or '/' in directory or '\\' in directory or directory in {'.','..'}:
-            raise ValueError('請先在總控選擇並確認 Chrome 設定檔。')
+            raise ValueError('請先在主視窗選擇並確認 Chrome 設定檔。')
         async with self.manager.picker_lock:
             self.note = '正在辨識已開啟 Chrome 視窗的設定檔。'
             self.event(self.note)
@@ -405,7 +405,7 @@ class Account:
 
     async def focus_window(self):
         if not self.page or self.page.is_closed():
-            raise ValueError('請先開啟專用視窗。')
+            raise ValueError('請先開啟獨立視窗。')
         await self.page.bring_to_front()
 
     def on_context_closed(self, context):
@@ -418,12 +418,12 @@ class Account:
     def on_closed(self, *_):
         self.cancel.set()
         if self.phase in {'opening', 'submitting', 'leaving'}:
-            self.phase, self.note = 'uncertain', '專用視窗已關閉，排隊可能中斷；請人工確認，不會自動重送。'
+            self.phase, self.note = 'uncertain', '獨立視窗已關閉，排隊可能中斷；請人工確認，不會自動重送。'
         elif self.phase in {'waiting', 'ready'}:
             # API polling loop will keep running; don't downgrade to uncertain yet.
-            self.note = '專用視窗已關閉，順位更新已停止。請重新開啟並確認網站狀態。'
+            self.note = '獨立視窗已關閉，順位更新已停止。請重新開啟並確認網站狀態。'
         elif self.phase not in {'uncertain'}:
-            self.phase, self.note = 'closed', '專用視窗已關閉。'
+            self.phase, self.note = 'closed', '獨立視窗已關閉。'
         self.persist()
         self.event(self.note)
 
@@ -454,7 +454,7 @@ class Account:
     def signal_ready(self):
         if self.phase == 'ready':
             return
-        self.phase, self.note = 'ready', '輪到你了，請切回專用視窗手動繼續。'
+        self.phase, self.note = 'ready', '輪到你了，請切回獨立視窗手動繼續。'
         self.metrics['readyAt'] = now()
         self.persist()
         self.event('輪到你了')
@@ -468,7 +468,9 @@ class Account:
             self.entry_pending = False
             self.cancel.set()
             self.phase = 'uncertain' if self.target else 'idle'
-            self.note = 'Cloudflare 要求真人驗證，自動操作已暫停。'
+            # shortcut: 這句必須與 notifications.py 的 CLOUDFLARE_NOTICE 完全一致，
+            # 否則 Cloudflare 通知的比對會失效；兩邊要一起改，未來應抽成共用常數。
+            self.note = 'Cloudflare 要求真人驗證，自動監看已暫停。'
             self.persist()
             self.event(self.note)
         raise CloudflarePaused(self.note)
@@ -628,7 +630,7 @@ class Account:
             raise ValueError('此帳號已有背景任務，請先停止目前操作。')
         self.entry_pending=True
         self.entry_passed_at=None
-        self.phase,self.note='recovering','等待入場；控制台可查看進度或停止。'
+        self.phase,self.note='recovering','等待入場；可在主視窗查看進度或停止。'
         self.cancel.clear();self.persist();self.event(self.note)
         self.task=asyncio.create_task(self.recover_entry())
 
@@ -641,7 +643,7 @@ class Account:
                 current=urlparse(self.page.url)
                 if current.netloc!='on-line.1kuji.com':return
                 if not entry_limited(text) and current.path not in {LIST_PATH,'/Form/Product/ProductDetail.aspx'}:
-                    self.phase,self.note='idle','請在專用視窗選擇商品；選定後自動監看。'
+                    self.phase,self.note='idle','請在獨立視窗選擇商品；選定後自動監看。'
                     self.persist();return
                 if entry_limited(text) and not self.config.get('entryRefresh', True):
                     self.phase, self.note = 'idle', '網站暫時限制入場；已關閉自動入場刷新，請手動操作。'
@@ -656,7 +658,7 @@ class Account:
                 config=validate_config({**self.config,'url':self.page.url})
                 if not config['pid']:
                     self.entry_passed_at=now()
-                    self.phase,self.note='idle','已通過入場，請在專用視窗選擇商品；選定後自動監看。'
+                    self.phase,self.note='idle','已通過入場，請在獨立視窗選擇商品；選定後自動監看。'
                     self.persist();return
                 self.config=config
                 self.entry_passed_at=now()
@@ -738,7 +740,7 @@ class Account:
                 raise ValueError('請先回到設定商品的選箱列表。')
             self.cloudflare_paused = False
         if not has_session and not browser_open:
-            raise ValueError('請先開啟專用視窗並登入，以建立 HTTP session。')
+            raise ValueError('請先開啟獨立視窗並登入，以建立 HTTP session。')
         self.config = validate_config(data)
         if browser_open:
             gate = False
@@ -753,11 +755,11 @@ class Account:
                     or urlparse(self.page.url).path == '/Form/Product/ProductDetail.aspx'
                     or gate):
                 if gate and not self.config.get('entryRefresh', True):
-                    raise ValueError('網站目前限制入場；已關閉自動入場刷新，請在專用視窗手動操作。')
+                    raise ValueError('網站目前限制入場；已關閉自動入場刷新，請在獨立視窗手動操作。')
                 self.begin_entry()
                 return
         if not self.config['pid']:
-            raise ValueError('請先開啟專用視窗並選擇商品。')
+            raise ValueError('請先開啟獨立視窗並選擇商品。')
         self.entry_pending=False
         # Sync cookies from browser when it is open so the HTTP session is fresh.
         if browser_open:
@@ -767,7 +769,7 @@ class Account:
             await self.sync_cookies()
             has_session = bool(self.http_session and not self.http_session.closed)
         if not has_session and not browser_open:
-            raise ValueError('尚未登入或 Cookie 無效，請在專用視窗重新登入。')
+            raise ValueError('尚未登入或 Cookie 無效，請在獨立視窗重新登入。')
         # Establish baseline: use visible DOM if browser is open, otherwise HTTP fetch.
         if browser_open:
             boxes = parse_boxes(await self.page.content())
@@ -888,7 +890,7 @@ class Account:
 
     async def inspect_current(self):
         if not self.page or self.page.is_closed():
-            raise ValueError('請先開啟專用視窗。')
+            raise ValueError('請先開啟獨立視窗。')
         if self.phase in {'opening','submitting','leaving'}:
             raise ValueError('目前操作正在送出，請稍後重新查看。')
         if self.phase == 'watching':
@@ -939,7 +941,7 @@ class Account:
                 if self.cancel.is_set():
                     return
                 if urlparse(self.page.url).path != LIST_PATH:
-                    raise ValueError('專用視窗已離開選箱列表，已停止監看。')
+                    raise ValueError('獨立視窗已離開選箱列表，已停止監看。')
                 try:
                     boxes = await self.fetch_boxes()
                 except (TimeoutError, aiohttp.ClientConnectionError) as error:
@@ -1107,7 +1109,7 @@ class Account:
                         if not self.page or self.page.is_closed() or navigation_errors > 30:
                             # Browser gone; switch to API-only mode.
                             if api_alive:
-                                self.note = '專用視窗關閉，改由 API 持續更新順位。'
+                                self.note = '獨立視窗關閉，改由背景連線持續更新順位。'
                                 self.persist()
                                 break
                             raise
@@ -1144,7 +1146,7 @@ class Account:
                         if self.queue_ahead is None or number < self.queue_ahead:
                             self.queue_no = number
                             self.queue_ahead = number
-                            self.phase, self.note = 'waiting', '已確認個人順位；請保持專用視窗開啟。'
+                            self.phase, self.note = 'waiting', '已確認個人順位；請保持獨立視窗開啟。'
                             self.metrics.setdefault('confirmedAt', now())
                             self.metrics['lastQueueAt'] = now()
                             self.persist()
@@ -1219,7 +1221,7 @@ class Account:
                     or self.queue_reason!='SoldOut' or not self.config.get('autoResumeSoldOut',True)):
                 return
             if not self.page or self.page.is_closed():
-                self.event('籤筒已售完，請開啟專用視窗後離箱重新監看。')
+                self.event('籤筒已售完，請開啟獨立視窗後離箱重新監看。')
                 return
             self.event('查詢確認0籤，自動離開本箱並返回列表監看')
             try:
@@ -1476,7 +1478,7 @@ def create_app(manager):
         data = await request.json()
         ident, command = data.get('id'), data.get('action')
         if manager.login_only and command not in {'open','focus','label','config','restart'}:
-            raise ValueError('控制台已關閉，目前僅能手動登入。')
+            raise ValueError('背景服務已關閉，目前僅能手動登入。')
         if ident not in manager.accounts:
             raise ValueError('帳號無效。')
         a = manager.accounts[ident]
@@ -1548,7 +1550,7 @@ def create_app(manager):
                 manager.login_only = False
             return web.json_response({'ok':True})
         if data.get('action') != 'shutdown' or data.get('confirmed') is not True:
-            raise ValueError('請確認停止服務可能中斷專用視窗與隊伍。')
+            raise ValueError('請確認停止服務可能中斷獨立視窗與隊伍。')
         manager.shutting_down = True
         asyncio.get_running_loop().call_later(0.3, manager.exit_requested.set)
         return web.json_response({'ok':True})
@@ -1592,7 +1594,7 @@ def main():
             pass
     listener=bind_listener()
     if listener is None:
-        print('另一份本機總控已在執行，未重複啟動或修改登入憑證。',flush=True)
+        print('另一份背景服務已在執行，未重複啟動或修改登入憑證。',flush=True)
         return
     if not args.login_only:
         spawn_notifier(args.runtime)

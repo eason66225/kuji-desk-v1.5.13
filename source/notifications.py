@@ -15,7 +15,9 @@ from urllib.parse import urlparse
 
 import aiohttp
 
-CLOUDFLARE_NOTICE = 'Cloudflare 要求真人驗證，自動操作已暫停。'
+# shortcut: 必須與 manager.py 設定的 note 完全一致，否則下方的相等比對會失效；
+# 兩邊要一起改，未來應抽成共用常數。
+CLOUDFLARE_NOTICE = 'Cloudflare 要求真人驗證，自動監看已暫停。'
 
 
 def cloudflare_event_key(account):
@@ -71,28 +73,28 @@ def payload_for(account, event_type=None):
 
     if event_type == 'cloudflare':
         title = '🛡️ Cloudflare 需要真人驗證'
-        desc = '此帳號出現 Cloudflare 安全驗證，自動操作已暫停。請切回此帳號的 Chrome 視窗，手動完成驗證後再啟動監看。'
+        desc = '此帳號出現 Cloudflare 安全驗證，自動監看已暫停。請切回此帳號的 Chrome 視窗，由你手動完成驗證後再重新啟動監看。'
         color = 0xF38020
     elif sold_out:
         title = '📢 籤筒已抽完（售完）'
         auto_resume = account.get('config', {}).get('autoResumeSoldOut', True)
-        desc = '目前鎖定的箱子籤數已抽完（售完）。' + ('已自動返回列表重新尋找新開滿箱。' if auto_resume else '請切回專用視窗選擇其他箱子。')
+        desc = '目前鎖定的箱子籤數已抽完（售完）。' + ('已自動返回列表重新尋找新開滿箱。' if auto_resume else '請切回獨立視窗選擇其他箱子。')
         color = 0xE67E22
     elif event_type == 'entry_passed':
-        title = '✅ 已通過入場限制'
-        desc = '入場管制已解除，請切回專用視窗選擇商品或籤箱。'
+        title = '✅ 可進入商品／籤箱頁'
+        desc = '網站入場管制已解除，請切回獨立視窗由你手動選擇商品或籤箱。'
         color = 0x57F287
     elif ready:
         title = '🔔 輪到你了！'
-        desc = '請立即切回此帳號的專用視窗，手動繼續購買。'
+        desc = '已輪到你的排隊順位，請立即切回此帳號的獨立視窗，由你手動進行抽籤與付款。'
         color = 0xD7F896
     elif waiting:
         title = '🔔 即將輪到你'
-        desc = '已達你設定的等待人數，請準備切回專用視窗。'
+        desc = '已達你設定的等待人數，請準備切回獨立視窗。'
         color = 0xFFBE84
     else:
-        title = '⚠️ 一番賞助手需要確認'
-        desc = '請切回本機總控檢查此帳號的網站訊息；助手不會自動重送排隊。'
+        title = '⚠️ Kuji Desk 需要確認'
+        desc = '請切回主視窗並查看此帳號的 Chrome 畫面確認網站訊息；程式不會自動重送排隊。'
         color = 0xFFBE84
 
     return {'username':'Kuji Desk', 'allowed_mentions':{'parse':[]}, 'embeds':[{
@@ -229,7 +231,7 @@ class Notifier:
                     self.report(enabled=True, connected=True)
                     await self.process(state.get('accounts',[]), config, session)
                 except Exception:
-                    self.report(enabled=True, connected=False, poll_error='無法讀取總控或本機設定；會繼續嘗試。')
+                    self.report(enabled=True, connected=False, poll_error='無法讀取背景服務或本機設定；系統會繼續嘗試。')
                 await asyncio.sleep(1)
 
 
