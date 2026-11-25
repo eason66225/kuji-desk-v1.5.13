@@ -39,7 +39,7 @@
 
 - 多分頁只在明確入場限制頁建立：同context原分頁+4新分頁；只能選一個同PID成功分頁進後續提交。只清理本次助手分頁，絕不遍歷context.pages全關。切換主分頁先解除舊close監聽，避免清理觸發帳號cancel。每個分頁各自依min/max隨機等待且可同時發請求；只有429/503冷卻共用，不再使用entry_reload_lock。新回歸另跑test_entry_tabs。
 - 帳號重啟若遇recovering／entry_pending，須先在帳號lock外取消入場task，再取得lock關窗重開；避免與recover_entry持鎖互等。回歸看test_restart_api_cancels_entry_before_waiting_for_account_lock。
-`n- 付款逾時僅辨識可見 customAlert 明確取消文案；單次確認返回同商品列表並核對無隊伍後，原箱有庫存才重排，失敗不重送。
+- 付款逾時僅辨識可見 customAlert 明確取消文案；單次確認返回同商品列表並核對無隊伍後，原箱有庫存才重排，失敗不重送。
 - recovering 狀態切回既有視窗須在帳號 lock 外執行並限制等待時間，避免等待入場任務持鎖造成 open 逾時。
 - 返回同商品正常選箱列表且無有效隊伍時，預設自動start重建監看基準；不限售完原因，其他商品不沿用設定。
 - cancel_observer 必須取消並await舊task，不可只set Event後等待可能卡在瀏覽器讀取的task；保留current_task防護。
