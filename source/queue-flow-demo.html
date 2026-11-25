@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+  <title>找箱與排隊模擬</title>
+  <style>
+    body { background: #101720; color: #edf3f8; font: 16px/1.6 system-ui, sans-serif; margin: 0; }
+    main { max-width: 43rem; margin: 8vh auto; padding: 0 1.2rem; }
+    h1 { margin-bottom: .25rem; }
+    p { color: #b7c7d6; }
+    section { border: 1px solid #34455a; background: #182433; padding: 1.2rem; border-radius: .7rem; }
+    fieldset { border: 0; padding: 0; margin: 0 0 1rem; }
+    label { display: block; }
+    button { font: inherit; background: #c8f39e; color: #172d15; border: 0; padding: .45rem .85rem; border-radius: .4rem; margin: .2rem .25rem .2rem 0; cursor: pointer; }
+    button:disabled { opacity: .55; cursor: default; }
+    button:focus-visible, input:focus-visible { outline: 3px solid #9ed5ff; outline-offset: 3px; }
+    #status { color: #d3f7ae; font-weight: 650; }
+    ol { padding-left: 1.7rem; }
+    time { color: #b7c7d6; font-variant-numeric: tabular-nums; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>找箱與排隊模擬</h1>
+    <p>離線測試。固定找 70 枚，第 3 輪會出現符合的新箱。</p>
+    <section>
+      <fieldset id="mode">
+        <legend>排隊方式</legend>
+        <label><input type="radio" name="queue" value="manual" checked> 找到後由我按排隊</label>
+        <label><input type="radio" name="queue" value="automatic"> 找到後自動送出模擬排隊</label>
+      </fieldset>
+      <button id="start" type="button">開始測試</button>
+      <button id="stop" type="button" disabled>停止</button>
+      <button id="join" type="button" disabled>確認模擬排隊</button>
+      <p id="status" role="status">等待開始</p>
+    </section>
+    <h2>執行紀錄</h2>
+    <ol id="log" aria-label="執行紀錄"></ol>
+  </main>
+  <script>
+    const mode = document.querySelector('#mode');
+    const startButton = document.querySelector('#start');
+    const stopButton = document.querySelector('#stop');
+    const joinButton = document.querySelector('#join');
+    const statusText = document.querySelector('#status');
+    const log = document.querySelector('#log');
+    const initial = { number: 100, tickets: 70 };
+    const later = [{ number: 101, tickets: 69 }, { number: 102, tickets: 170 }, { number: 103, tickets: 70 }];
+    let phase = 'idle';
+    let timer;
+    let round;
+    let selectedBox;
+    let automatic;
+    let startedAt;
+
+    function record(message) {
+      const row = document.createElement('li');
+      const time = document.createElement('time');
+      time.textContent = ((performance.now() - startedAt) / 1000).toFixed(2) + ' 秒';
+      row.append(time, '　' + message);
+      log.append(row);
+    }
+
+    function setPhase(next, message) {
+      phase = next;
+      const active = next === 'watching' || next === 'found';
+      startButton.disabled = active;
+      stopButton.disabled = !active;
+      mode.disabled = active;
+      joinButton.disabled = next !== 'found' || automatic;
+      statusText.textContent = message;
+    }
+
+    function schedule() {
+      const delay = 2000 + Math.floor(Math.random() * 1001);
+      record('下一輪等待 ' + delay + ' 毫秒');
+      timer = setTimeout(scan, delay);
+    }
+
+    function scan() {
+      if (phase !== 'watching') return;
+      round++;
+      const visibleBoxes = [initial, ...later.slice(0, round)];
+      selectedBox = visibleBoxes.find(box => box.number > initial.number && box.tickets === 70);
+      if (!selectedBox) {
+        record('第 ' + round + ' 輪，沒有符合籤數的新箱');
+        schedule();
+        return;
+      }
+      const box = '模擬箱 ' + selectedBox.number;
+      record('第 ' + round + ' 輪找到 ' + box + '，停止刷新並進入模擬箱頁');
+      setPhase('found', box + '已開啟，等待確認排隊。');
+      if (automatic) join();
+    }
+
+    function join() {
+      if (phase !== 'found') return;
+      record((automatic ? '自動' : '手動') + '送出一次模擬排隊');
+      setPhase('queued', '模擬排隊成功，前方 3 人。');
+    }
+
+    startButton.addEventListener('click', () => {
+      round = 0;
+      automatic = document.querySelector('input[name="queue"]:checked').value === 'automatic';
+      startedAt = performance.now();
+      log.replaceChildren();
+      setPhase('watching', '正在等符合條件的新箱…');
+      record('基準箱號 ' + initial.number + '，目標 70 枚');
+      schedule();
+    });
+    stopButton.addEventListener('click', () => {
+      clearTimeout(timer);
+      record('手動停止');
+      setPhase('idle', '已停止。');
+    });
+    joinButton.addEventListener('click', join);
+  </script>
+</body>
+</html>

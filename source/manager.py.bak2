@@ -1,0 +1,971 @@
+"""Local three-profile Kuji manager. No extension, credential export or automatic purchases."""
+import argparse
+import asyncio
+import html
+import json
+import os
+from pathlib import Path
+import random
+import re
+import secrets
+import time
+from urllib.parse import parse_qs, urlencode, urlparse
+import webbrowser
+from urllib.request import Request, urlopen
+
+import aiohttp
+from aiohttp import web
+import aiohttp
+from bs4 import BeautifulSoup
+from playwright.async_api import async_playwright
+from details import parse_detail_text, READ_DETAIL
+from notifications import spawn_notifier
+
+HERE = Path(__file__).resolve().parent
+CHECKOUT_RUNTIME = HERE.parents[1] / 'Runtime' / 'kuji-manager'
+DEFAULT_RUNTIME = Path(os.environ.get('KUJI_RUNTIME', str(
+    CHECKOUT_RUNTIME if (HERE.parents[1] / 'AGENTS.md').exists()
+    else Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'KujiDesk')))
+ORIGIN = 'https://on-line.1kuji.com'
+LIST_PATH = '/Form/Product/SelectBox.aspx'
+DETAIL_PATH = '/Form/Product/SelectBoxDetail.aspx'
+ACTIVE = {'watching', 'opening', 'submitting', 'waiting', 'ready', 'uncertain', 'leaving'}
+LABELS = {'closed':'未開啟', 'idle':'待命', 'watching':'監看新箱', 'opening':'開啟箱子',
+          'leaving':'退出並重排中', 'submitting':'已觸發排隊', 'waiting':'已確認排隊', 'ready':'輪到你了', 'uncertain':'需要確認'}
+
+
+def now():
+    return round(time.time() * 1000)
+
+
+def list_url(value):
+    u = urlparse(html.unescape(str(value).strip()))
+    q = parse_qs(u.query)
+    pid = q.get('pid', [''])[0]
+    if u.scheme != 'https' or u.netloc != 'on-line.1kuji.com' or u.path != LIST_PATH or not re.fullmatch(r'[A-Za-z0-9_]{1,80}', pid):
+        raise ValueError('請貼上一番賞的選箱列表網址，需包含 pid。')
+    page = q.get('pno', ['1'])[0]
+    if not page.isdigit() or not 1 <= int(page) <= 9999:
+        raise ValueError('選箱頁碼無效。')
+    return ORIGIN + LIST_PATH + '?' + urlencode({'pid':pid, 'pno':page}), pid
+
+
+def detail_url(pid, target):
+    return ORIGIN + DETAIL_PATH + '?' + urlencode({'shop':'0', 'pid':pid, 'lbdid':target['id'], 'sort':'', 'fil':'', 'udns':'', 'pno':'1'})
+
+
+def parse_boxes(text):
+    soup = BeautifulSoup(text, 'html.parser')
+    boxes = []
+    for item in soup.select('.selectbox__box-list-item'):
+        link = item.select_one('a[class*="BOX-"]')
+        amount = item.select_one('.selectbox__text--product-amount')
+        waiting = item.select_one('.selectbox__text--product-waiting')
+        classes = ' '.join(link.get('class', [])) if link else ''
+        seq = re.search(r'(?:^|\s)BOX-(\d+)(?:\s|$)', classes)
+        ident = re.search(r'(?:^|\s)([0-9A-F]{16})(?:\s|$)', classes, re.I)
+        count = re.search(r'残\s*(\d+)\s*枚', amount.get_text()) if amount else None
+        people = re.search(r'(\d+)\s*人', waiting.get_text()) if waiting else None
+        if seq and ident and count:
+            boxes.append({'seq':int(seq[1]), 'id':ident[1].upper(), 'amount':int(count[1]), 'waiting':int(people[1]) if people else None})
+    if not boxes:
+        raise ValueError('未讀到箱子。請檢查登入、驗證或網站訊息；監看已停止。')
+    return boxes
+
+
+def select_box(boxes, baseline, count):
+    choices = [b for b in boxes if b['seq'] > baseline and b['amount'] == count]
+    return min(choices, key=lambda b:(b['waiting'] if b['waiting'] is not None else float('inf'), -b['seq'])) if choices else None
+
+
+def validate_config(data):
+    url, pid = list_url(data.get('url', ''))
+    count = int(data.get('count', 70))
+    low, high = float(data.get('minSeconds', 2.2)), float(data.get('maxSeconds', 4.5))
+    if not 1 <= count <= 1000 or not 2.2 <= low <= high <= 300:
+        raise ValueError('張數需為 1–1000，隨機間隔需為 2.2–300 秒且最短不大於最長。')
+    return {'url':url, 'pid':pid, 'count':count, 'minSeconds':low, 'maxSeconds':high, 'autoResumeSoldOut':bool(data.get('autoResumeSoldOut', True))}
+
+
+class Account:
+    def __init__(self, manager, ident):
+        self.manager, self.id = manager, ident
+        self.label = f'帳號 {ident}'
+        self.context = self.page = self.task = None
+        self.http_session: 'aiohttp.ClientSession | None' = None
+        self.user_id: 'str | None' = None
+        self.lock = asyncio.Lock()
+        self.phase, self.note = 'closed', '開啟專用視窗後，手動登入此帳號。'
+        self.config, self.target, self.metrics = {}, None, {}
+        self.queue_no = None
+        self.queue_alert = False
+        self.queue_reason = None
+        self.soldout_acknowledged = False
+        self.queue_ahead = None
+        self.inventory = {}
+        self.exit_available = self.refresh_available = False
+        self.events = []
+        self.next_check = None
+        self.cancel = asyncio.Event()
+        self.journal = manager.runtime / f'job-{ident}.json'
+        if self.journal.exists():
+            try:
+                saved = json.loads(self.journal.read_text(encoding='utf-8'))
+                self.config = saved.get('config', {})
+                self.label = saved.get('label', self.label)
+                if saved.get('phase') in ACTIVE:
+                    self.phase = 'uncertain'
+                    self.target, self.metrics = saved.get('target'), saved.get('metrics', {})
+                    self.note = '上次任務未結束：不會自動重送。請先確認網站排隊狀態。'
+            except (ValueError, OSError):
+                self.phase, self.note = 'uncertain', '上次紀錄無法讀取，請確認網站狀態後結束本次任務。'
+
+    def persist(self):
+        value = {'phase':self.phase, 'label':self.label, 'config':self.config, 'target':self.target, 'metrics':self.metrics}
+        temp = self.journal.with_suffix('.tmp')
+        with temp.open('w', encoding='utf-8') as f:
+            json.dump(value, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        temp.replace(self.journal)
+
+    def event(self, message):
+        self.events.append({'at':now(), 'message':message})
+        self.events = self.events[-30:]
+
+    def state(self):
+        opened = self.page is not None and not self.page.is_closed()
+        has_session = bool(self.http_session and not self.http_session.closed)
+        page_url = urlparse(self.page.url) if opened else None
+        return {'id':self.id, 'label':self.label, 'phase':self.phase, 'phaseLabel':LABELS[self.phase],
+                'note':self.note, 'opened':opened, 'hasSession':has_session,
+                'target':self.target, 'queueNo':self.queue_no,
+                'metrics':self.metrics, 'inventory':self.inventory, 'queueAhead':self.queue_ahead, 'soldOut':self.queue_reason == 'SoldOut' or (self.inventory.get('remaining') == 0 if self.inventory else False),
+                'canRequeue':opened and self.phase in {'idle','waiting','ready','uncertain'},
+                'canRestart':True,
+                'canInspect':opened and self.phase not in {'opening','submitting','leaving'},
+                'canRefresh':opened and self.phase not in {'opening','submitting','leaving'}
+                    and page_url and page_url.netloc == 'on-line.1kuji.com' and page_url.path == DETAIL_PATH,
+                'events':self.events[-8:], 'config':self.config,
+                'nextCheckAt':self.next_check, 'url':self.page.url if opened else None,
+                'canStart':(has_session or opened) and self.phase in {'idle','closed'},
+                'canStop':self.phase == 'watching', 'canReset':self.phase in {'uncertain','ready','waiting'}}
+
+
+    async def sync_cookies(self):
+        """Sync browser cookies into the aiohttp session and extract userId.
+
+        Called after every browser navigation so HTTP requests can proceed
+        without the browser being open.  Skips gracefully when page is closed.
+        """
+        if not self.page or self.page.is_closed() or not self.context:
+            return
+        cookies = await self.context.cookies(["https://on-line.1kuji.com"])
+        cookie_dict = {c["name"]: c["value"] for c in cookies}
+        if self.http_session and not self.http_session.closed:
+            await self.http_session.close()
+        self.http_session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=20),
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+        self.http_session.cookie_jar.update_cookies(cookie_dict)
+        try:
+            uid_js = "() => { const m = document.documentElement.innerHTML.match(/userId\\s*:\\s*'([^']{1,80})'/); return m ? m[1] : null; }"
+            uid = await self.page.evaluate(uid_js)
+            if uid:
+                self.user_id = uid
+        except Exception:
+            pass
+
+    async def open(self, data):
+        if self.page and not self.page.is_closed():
+            await self.focus_window(toggle=True)
+            return
+        config = validate_config(data)
+        profile = self.manager.runtime / 'profiles' / self.id
+        profile.mkdir(parents=True, exist_ok=True)
+        self.context = await self.manager.playwright.chromium.launch_persistent_context(
+            str(profile), channel='chrome', headless=False, no_viewport=True,
+            args=['--no-first-run', '--no-default-browser-check'])
+        self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
+        # Extra manually opened pages are never closed automatically.
+        self.context.on('close', self.on_closed)
+        self.page.on('close', self.on_closed)
+        self.page.on('websocket', self.watch_socket)
+        if self.phase == 'uncertain' and self.target and self.config.get('pid'):
+            url = detail_url(self.config['pid'], self.target)
+            await self.page.goto(url, wait_until='domcontentloaded', timeout=30000)
+            await self.sync_cookies()
+            self.cancel = asyncio.Event()
+            self.task = asyncio.create_task(self.observe_queue())
+        elif self.phase == 'uncertain':
+            await self.page.goto(config['url'], wait_until='domcontentloaded', timeout=30000)
+            await self.sync_cookies()
+        else:
+            self.config = config
+            self.phase, self.note = 'idle', '請在專用視窗完成登入，再啟動監看。'
+            await self.page.goto(config['url'], wait_until='domcontentloaded', timeout=30000)
+            await self.sync_cookies()
+        self.event('已開啟獨立登入視窗')
+        self.persist()
+
+    async def focus_window(self, toggle=False):
+        if not self.page or self.page.is_closed():
+            raise ValueError('請先開啟專用視窗。')
+        session = await self.context.new_cdp_session(self.page)
+        try:
+            window = await session.send('Browser.getWindowForTarget')
+            if window.get('bounds', {}).get('windowState') == 'minimized':
+                await session.send('Browser.setWindowBounds', {
+                    'windowId':window['windowId'], 'bounds':{'windowState':getattr(self,'restore_window_state','normal')}})
+            elif toggle:
+                self.restore_window_state = window.get('bounds', {}).get('windowState','normal')
+                await session.send('Browser.setWindowBounds', {
+                    'windowId':window['windowId'], 'bounds':{'windowState':'minimized'}})
+                return
+            await self.page.bring_to_front()
+        finally:
+            await session.detach()
+
+    def on_closed(self, *_):
+        self.cancel.set()
+        if self.phase in {'opening', 'submitting', 'leaving'}:
+            self.phase, self.note = 'uncertain', '專用視窗已關閉，排隊可能中斷；請人工確認，不會自動重送。'
+        elif self.phase in {'waiting', 'ready'}:
+            # API polling loop will keep running; don't downgrade to uncertain yet.
+            self.note = '專用視窗已關閉，API 繼續監測排隊順位。'
+        elif self.phase not in {'uncertain'}:
+            self.phase, self.note = 'closed', '專用視窗已關閉。'
+        self.persist()
+        self.event(self.note)
+
+    def watch_socket(self, socket):
+        if socket.url == 'wss://on-line.1kuji.com/_webapi/LotteryBoxQueue':
+            socket.on('framereceived', self.socket_message)
+
+    def socket_message(self, payload):
+        # Passive observation only: never send WebSocket messages ourselves.
+        try:
+            data = json.loads(payload)
+        except (ValueError, TypeError):
+            return
+        if self.phase not in {'submitting','waiting','ready','uncertain'}:
+            return
+        if not isinstance(data, dict):
+            return
+        action = data.get('Action')
+        if action == 'YourTurn':
+            self.signal_ready()
+        elif action in {'Close','SoldOut','TimeUp','EndViewing'}:
+            self.queue_reason = action
+            self.queue_alert = True
+            self.phase, self.note = 'uncertain', f'網站通知 {action}，請切回視窗確認。'
+            self.persist()
+            self.event(self.note)
+
+    def signal_ready(self):
+        if self.phase == 'ready':
+            return
+        self.phase, self.note = 'ready', '輪到你了，請切回專用視窗手動繼續。'
+        self.metrics['readyAt'] = now()
+        self.persist()
+        self.event('輪到你了')
+
+    async def fetch_boxes(self):
+        """Fetch the box list page via aiohttp (no browser needed).
+
+        Falls back to the Playwright context request if the HTTP session is
+        unavailable so the browser-open path keeps working unchanged.
+        """
+        started = time.monotonic()
+        if self.http_session and not self.http_session.closed:
+            async with self.http_session.get(self.config['url'],
+                    headers={'Cache-Control': 'no-cache'}) as resp:
+                if resp.status != 200:
+                    raise ValueError(f'網站回傳 HTTP {resp.status}，監看停止，請人工確認。')
+                final_url = str(resp.url)
+                url, pid = list_url(final_url)
+                if pid != self.config['pid']:
+                    raise ValueError('網站已導向其他商品，監看停止。')
+                boxes = parse_boxes(await resp.text())
+        else:
+            # Fallback: browser context request (requires browser open)
+            if not self.context:
+                raise ValueError('請先開啟專用視窗並登入，HTTP session 尚未建立。')
+            response = await self.context.request.get(self.config['url'], timeout=15000, headers={'Cache-Control':'no-cache'})
+            try:
+                if response.status != 200:
+                    raise ValueError(f'網站回傳 HTTP {response.status}，監看停止，請人工確認。')
+                url, pid = list_url(response.url)
+                if pid != self.config['pid']:
+                    raise ValueError('網站已導向其他商品，監看停止。')
+                boxes = parse_boxes(await response.text())
+            finally:
+                await response.dispose()
+        self.metrics.update(lastCheckedAt=now(), requestMs=round((time.monotonic()-started)*1000))
+        return boxes
+
+    async def api_wait_count(self):
+        """Poll GetLotteryBoxWaitCount to read queue position without the browser.
+
+        Returns a dict with 'ahead' (int | None).  Never raises -- returns {}
+        on any network or parse error so the caller can keep the last known state.
+        """
+        if not self.http_session or self.http_session.closed:
+            return {}
+        if not self.target or not self.config.get('pid') or not self.user_id:
+            return {}
+        endpoint = ORIGIN + DETAIL_PATH + '/GetLotteryBoxWaitCount'
+        body = {'userId': self.user_id, 'productId': self.config['pid'],
+                'hashedDisplayId': self.target['id']}
+        try:
+            async with self.http_session.post(endpoint, json=body,
+                    headers={'Origin': ORIGIN,
+                             'Referer': detail_url(self.config['pid'], self.target),
+                             'Content-Type': 'application/json'}) as resp:
+                data = await resp.json(content_type=None)
+            result = data.get('d', {})
+            if isinstance(result, str):
+                try:
+                    result = json.loads(result)
+                except (ValueError, TypeError):
+                    result = {}
+            if not isinstance(result, dict):
+                return {}
+            ahead = result.get('your_waiting_no')
+            if ahead is not None:
+                try:
+                    ahead = int(ahead)
+                except (ValueError, TypeError):
+                    ahead = None
+            return {'ahead': ahead}
+        except Exception:
+            return {}
+
+    async def start(self, data):
+        if self.phase not in {'idle','closed'}:
+            raise ValueError('此帳號已有任務。先檢查網站狀態，再結束本次任務；不會覆蓋或重送。')
+        # Require either a live HTTP session (cookie synced) or an open browser.
+        # If the browser is open and on the same list page, also sync cookies first.
+        has_session = bool(self.http_session and not self.http_session.closed)
+        browser_open = bool(self.page and not self.page.is_closed())
+        if not has_session and not browser_open:
+            raise ValueError('請先開啟專用視窗並登入，以建立 HTTP session。')
+        self.config = validate_config(data)
+        # Sync cookies from browser when it is open so the HTTP session is fresh.
+        if browser_open:
+            await self.sync_cookies()
+            has_session = bool(self.http_session and not self.http_session.closed)
+        if not has_session and not browser_open:
+            raise ValueError('尚未登入或 Cookie 無效，請在專用視窗重新登入。')
+        # Establish baseline: use visible DOM if browser is open, otherwise HTTP fetch.
+        if browser_open:
+            boxes = parse_boxes(await self.page.content())
+        else:
+            boxes = await self.fetch_boxes()
+        self.baseline = max(b['seq'] for b in boxes)
+        self.phase, self.note = 'watching', f'基準 BOX-{self.baseline:05d}，等待新開滿箱。'
+        self.target, self.queue_no = None, None
+        self.queue_ahead, self.inventory = None, {}
+        self.exit_available = self.refresh_available = False
+        self.queue_alert = False
+        self.queue_reason = None
+        self.soldout_acknowledged = False
+        self.metrics = {k:v for k,v in self.metrics.items() if k in {'lastCheckedAt','requestMs'}}
+        self.metrics['startedAt'] = now()
+        self.cancel = asyncio.Event()
+        self.persist()
+        self.event(f'開始監看新 {self.config["count"]} 枚箱；基準 {self.baseline:05d}')
+        self.task = asyncio.create_task(self.hunt())
+
+    async def navigate_list(self, data):
+        if self.phase in {'watching','opening','submitting','leaving'} or not self.page or self.page.is_closed():
+            raise ValueError('請先停止目前監看，或等候正在送出的操作完成。')
+        url = urlparse(self.page.url)
+        if url.path.startswith('/Form/Order/'):
+            raise ValueError('目前在購買頁，請先在網站完成或取消。')
+        signal = await self.read_detail()
+        if signal.get('exitVisible') or signal.get('ahead') is not None:
+            raise ValueError('目前仍在隊伍中，請使用「離開目前箱並監看」正式退出。')
+        await self.cancel_observer()
+        config = validate_config(data)
+        await self.page.goto(config['url'], wait_until='domcontentloaded', timeout=30000)
+        self.clear_queue_state()
+        self.config = config
+        self.phase, self.note = 'idle', '已開啟選箱列表，可以開始監看。'
+        self.persist()
+
+    async def cancel_observer(self):
+        self.cancel.set()
+        if self.task and self.task is not asyncio.current_task():
+            await self.task
+        self.task = None
+
+    def clear_queue_state(self):
+        self.target, self.queue_no, self.queue_ahead = None, None, None
+        self.inventory, self.next_check = {}, None
+        self.exit_available = self.refresh_available = False
+        self.queue_alert, self.queue_reason = False, None
+
+    async def reconcile_queue_page(self, signal):
+        current = signal.get('url')
+        if not current:
+            return False
+        url = urlparse(current)
+        if url.netloc != 'on-line.1kuji.com':
+            self.phase, self.note = 'uncertain', '目前已離開商品頁，請重新查看或重啟此帳號。'
+            self.queue_no = self.queue_ahead = None
+            self.exit_available = False
+            return False
+        if url.path == LIST_PATH:
+            if signal.get('exitVisible') or signal.get('ahead') is not None or (signal.get('number') or 0) > 0:
+                return False
+            # A returned list must never keep a stale personal rank or box lock.
+            try:
+                boxes = parse_boxes(await self.page.content())
+            except ValueError:
+                return False
+            old_id = (self.target or {}).get('id')
+            old = next((box for box in boxes if box['id'] == old_id), None)
+            same_product = parse_qs(url.query).get('pid',[''])[0] == self.config.get('pid')
+            sold_out = same_product and (self.queue_reason == 'SoldOut' or (old is not None and old['amount'] == 0))
+            config = dict(self.config)
+            self.clear_queue_state()
+            self.phase, self.note = 'idle', '網站已返回選箱列表，舊隊伍狀態已清除。'
+            self.persist()
+            self.event(self.note)
+            if sold_out and config.get('autoResumeSoldOut', True):
+                self.event('已確認售完退回列表，自動重新監看新滿箱')
+                await self.start(config)
+            return True
+        if url.path == DETAIL_PATH:
+            query = parse_qs(url.query)
+            ident, pid = query.get('lbdid',[''])[0], query.get('pid',[''])[0]
+            if re.fullmatch(r'[0-9A-Fa-f]{16}', ident) and re.fullmatch(r'[A-Za-z0-9_]{1,80}',pid):
+                if ident != (self.target or {}).get('id'):
+                    self.target = {'id':ident.upper(),'seq':None}
+                    self.queue_no = self.queue_ahead = None
+                    self.metrics.pop('readyAt',None)
+                    self.queue_alert = False
+                    self.queue_reason = None
+                    self.config.update(url=ORIGIN+LIST_PATH+'?'+urlencode({'pid':pid,'pno':1}),pid=pid)
+                    self.phase, self.note = 'uncertain', '已依目前視窗更新箱號，重新讀取隊伍狀態。'
+                    self.persist()
+                    self.event('目前視窗箱號已變更，舊箱號鎖定已解除')
+        return False
+
+    async def inspect_current(self):
+        if not self.page or self.page.is_closed():
+            raise ValueError('請先開啟專用視窗。')
+        if self.phase in {'opening','submitting','leaving'}:
+            raise ValueError('目前操作正在送出，請稍後重新查看。')
+        if self.phase == 'watching':
+            return
+        await self.cancel_observer()
+        signal = await self.read_detail()
+        if await self.reconcile_queue_page(signal):
+            return
+        if signal.get('exitVisible') or signal.get('ahead') is not None or signal.get('ready'):
+            self.cancel = asyncio.Event()
+            self.task = asyncio.create_task(self.observe_queue())
+            self.note = '已重新接續目前視窗的隊伍資訊。'
+        else:
+            inventory = self.inventory
+            self.clear_queue_state()
+            self.inventory = inventory
+            self.phase, self.note = 'idle', '目前頁面未顯示個人隊伍，可返回選箱列表。'
+        self.persist()
+
+    async def restart_account(self, data):
+        await self.cancel_observer()
+        if self.context:
+            try:
+                await self.context.close()
+            except Exception:
+                pass
+        self.context = self.page = None
+        self.clear_queue_state()
+        self.phase, self.note = 'closed', '已重啟此帳號，登入設定保留；沒有自動提交排隊。'
+        self.metrics = {}
+        self.persist()
+        await self.open(data)
+        self.event('此帳號視窗已重新啟動，另外兩個帳號未變更')
+
+    async def hunt(self):
+        try:
+            deadline = time.monotonic() + 1800
+            first_check = True
+            while not self.cancel.is_set():
+                if time.monotonic() >= deadline:
+                    self.phase, self.note = 'idle', '30 分鐘監看已到期。'
+                    self.persist()
+                    return
+                delay = 0 if first_check else random.uniform(self.config['minSeconds'], self.config['maxSeconds'])
+                first_check = False
+                self.next_check = now() + round(delay*1000)
+                if delay:
+                    try:
+                        await asyncio.wait_for(self.cancel.wait(), timeout=delay)
+                        return
+                    except TimeoutError:
+                        pass
+                if self.cancel.is_set():
+                    return
+                if urlparse(self.page.url).path != LIST_PATH:
+                    raise ValueError('專用視窗已離開選箱列表，已停止監看。')
+                boxes = await self.fetch_boxes()
+                if self.cancel.is_set():
+                    return
+                candidate = select_box(boxes, self.baseline, self.config['count'])
+                if candidate:
+                    self.target = candidate
+                    self.metrics['foundAt'] = now()
+                    self.phase, self.note = 'opening', f'發現新箱 BOX-{candidate["seq"]:05d}，準備排隊。'
+                    self.next_check = None
+                    self.persist()
+                    self.event(self.note)
+                    await self.enter_queue()
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self.phase, self.note = 'uncertain', str(e)[:300]
+            self.persist()
+            self.event(self.note)
+        finally:
+            self.next_check = None
+
+    async def enter_queue(self):
+        await self.page.goto(detail_url(self.config['pid'], self.target), wait_until='domcontentloaded', timeout=30000)
+        if self.cancel.is_set():
+            return
+        button = self.page.locator('a.waitingStart[id$="_lbAddQueue"]')
+        await button.wait_for(state='visible', timeout=8000)
+        if await button.count() != 1 or not await button.is_visible():
+            raise ValueError('未找到排隊按鈕，請檢查網站訊息。')
+        if await button.get_attribute('data-product-id') != self.config['pid'] or await button.get_attribute('data-display-id') != self.target['id']:
+            raise ValueError('排隊按鈕與鎖定箱子不符，已停止。')
+        self.phase, self.note = 'submitting', '已記錄一次提交，等待網站個人順位；不重送。'
+        self.metrics['submittedAt'] = now()
+        self.persist()  # Durable before the single click, including across process crashes.
+        await button.click(timeout=8000, no_wait_after=True)
+        self.event('已觸發網站排隊按鈕一次')
+        # Sync cookies immediately after the click so the HTTP session has the
+        # latest session state for API-only queue tracking.
+        try:
+            await asyncio.sleep(1)  # brief wait for page to settle after click
+            await self.sync_cookies()
+        except Exception:
+            pass
+        await self.observe_queue()
+
+    async def _api_poll_loop(self):
+        """Background task: poll GetLotteryBoxWaitCount every ~15 s while queuing.
+
+        This supplements the WebSocket signal (watch_socket / socket_message)
+        so we still get position updates if the WebSocket is quiet or the
+        browser window is closed.
+        """
+        POLL_INTERVAL = 15.0
+        while not self.cancel.is_set():
+            try:
+                await asyncio.wait_for(self.cancel.wait(), timeout=POLL_INTERVAL)
+                return
+            except TimeoutError:
+                pass
+            if self.phase not in {'submitting', 'waiting', 'ready'}:
+                continue
+            result = await self.api_wait_count()
+            ahead = result.get('ahead')
+            if ahead is not None and self.phase not in {'ready'}:
+                if self.queue_no != ahead or self.phase != 'waiting':
+                    self.queue_no = ahead
+                    self.queue_ahead = ahead
+                    self.phase, self.note = 'waiting', '已確認個人順位（API 更新）；請保持視窗連線。'
+                    self.metrics.setdefault('confirmedAt', now())
+                    self.metrics['lastQueueAt'] = now()
+                    self.persist()
+                    self.event(f'API 輪詢：前方還有 {ahead} 人')
+
+    async def observe_queue(self):
+        """Watch queue state from both browser DOM and API polling.
+
+        When the browser window is open the DOM path runs as before.
+        In parallel, _api_poll_loop provides position updates via HTTP so the
+        manager stays informed even if the browser is minimised or closed after
+        the queue button was clicked.
+        """
+        pending_since = time.monotonic()
+        navigation_errors = 0
+        # Launch the API polling companion task.
+        poll_task = asyncio.create_task(self._api_poll_loop())
+        try:
+            while not self.cancel.is_set():
+                page_alive = self.page and not self.page.is_closed()
+                api_alive = bool(self.http_session and not self.http_session.closed)
+                if not page_alive and not api_alive:
+                    break
+                # DOM path: only while the browser page is open.
+                if page_alive:
+                    try:
+                        signal = await self.read_detail()
+                        navigation_errors = 0
+                    except Exception:
+                        navigation_errors += 1
+                        if not self.page or self.page.is_closed() or navigation_errors > 30:
+                            # Browser gone; switch to API-only mode.
+                            if api_alive:
+                                self.note = '專用視窗關閉，改由 API 持續更新順位。'
+                                self.persist()
+                                break
+                            raise
+                        await asyncio.sleep(0.5)
+                        continue
+                    if await self.reconcile_queue_page(signal):
+                        return
+                    if signal.get('soldOut'):
+                        self.queue_reason = 'SoldOut'
+                        self.queue_alert = True
+                        self.phase, self.note = 'uncertain', '箱子售完，正在等待網站返回選箱列表。'
+                        self.persist()
+                        if not self.soldout_acknowledged:
+                            self.soldout_acknowledged = True
+                            self.event('網站顯示售完，確認返回選箱列表')
+                            try:
+                                await self.page.locator('#customAlert .ok-button').click(timeout=5000, no_wait_after=True)
+                            except Exception:
+                                pass
+                    if self.queue_alert:
+                        await asyncio.sleep(1)
+                        continue
+                    if signal['ready']:
+                        self.signal_ready()
+                    elif (signal.get('ahead') is not None or (signal.get('number') is not None and signal['number'] > 0)) and self.phase != 'ready':
+                        number = signal['ahead'] if signal.get('ahead') is not None else signal['number']
+                        if self.queue_no != number or self.phase != 'waiting':
+                            self.queue_no = number
+                            self.queue_ahead = signal.get('ahead')
+                            self.phase, self.note = 'waiting', '已確認個人順位；請保持專用視窗開啟。'
+                            self.metrics.setdefault('confirmedAt', now())
+                            self.metrics['lastQueueAt'] = now()
+                            self.persist()
+                            self.event(f'前方還有 {self.queue_ahead} 人' if self.queue_ahead is not None else f'網站順位 {self.queue_no}')
+                    elif self.phase == 'submitting' and time.monotonic()-pending_since > 30:
+                        self.phase, self.note = 'uncertain', '30 秒內未確認順位，請人工檢查；不會重送。'
+                        self.persist()
+                        self.event(self.note)
+                try:
+                    await asyncio.wait_for(self.cancel.wait(), timeout=1)
+                except TimeoutError:
+                    pass
+            # API-only phase: keep alive until cancel or terminal signal arrives.
+            if api_alive and not self.cancel.is_set():
+                while not self.cancel.is_set():
+                    if self.phase in {'ready', 'uncertain'}:
+                        break
+                    try:
+                        await asyncio.wait_for(self.cancel.wait(), timeout=5)
+                    except TimeoutError:
+                        pass
+        except Exception as e:
+            if not self.cancel.is_set():
+                self.phase, self.note = 'uncertain', f'無法讀取排隊頁面：{str(e)[:180]}'
+                self.persist()
+        finally:
+            poll_task.cancel()
+            try:
+                await poll_task
+            except asyncio.CancelledError:
+                pass
+
+    async def read_detail(self):
+        signal = await self.page.evaluate(READ_DETAIL)
+        info = parse_detail_text(signal.get('text', ''))
+        self.exit_available = bool(signal.get('exitVisible'))
+        self.refresh_available = bool(signal.get('refreshEnabled'))
+        if info['remaining'] is not None or info['prizes']:
+            self.inventory = {k:v for k,v in info.items() if k != 'ahead'}
+            self.inventory['readAt'] = now()
+        signal['ahead'] = info['ahead']
+        return signal
+
+    async def refresh_inventory(self):
+        if self.phase in {'opening','submitting','leaving'} or not self.page or self.page.is_closed():
+            raise ValueError('請先進入箱子，並等目前操作完成。')
+        current = urlparse(self.page.url)
+        if current.netloc != 'on-line.1kuji.com' or current.path != DETAIL_PATH:
+            raise ValueError('目前不是箱子詳情頁，可先按「重新查看／修復」。')
+        # Normal browser reload is the F5 operation. Never click the site's
+        # inventory refresh button, and do not impose its button cooldown.
+        await self.page.reload(wait_until='domcontentloaded', timeout=15000)
+        await self.read_detail()
+        self.event('已執行整頁重新整理（F5），未點網站庫存更新按鈕')
+
+    def matches_target(self):
+        if not self.page or not self.target:
+            return False
+        url = urlparse(self.page.url)
+        query = parse_qs(url.query)
+        return (url.scheme == 'https' and url.netloc == 'on-line.1kuji.com'
+                and url.path == DETAIL_PATH and query.get('pid',[''])[0] == self.config.get('pid')
+                and query.get('lbdid',[''])[0] == self.target.get('id'))
+
+    async def leave_and_requeue(self):
+        if self.phase in {'watching','opening','submitting','leaving'} or not self.page or self.page.is_closed():
+            raise ValueError('請先停止監看，或等候正在送出的操作完成。')
+        current = urlparse(self.page.url)
+        if current.scheme != 'https' or current.netloc != 'on-line.1kuji.com' or current.path not in {LIST_PATH,DETAIL_PATH}:
+            raise ValueError('請在目前視窗開啟選箱或箱子詳情頁；也可重啟此帳號視窗。')
+        pid = parse_qs(current.query).get('pid',[''])[0]
+        data = dict(self.config)
+        data['url'] = ORIGIN+LIST_PATH+'?'+urlencode({'pid':pid,'pno':1})
+        config = validate_config(data)
+        # Explicit recovery follows the actual page, not a stale recorded box ID.
+        exit_button = self.page.locator('[id$="_lbExitQueue"]')
+        has_exit = await exit_button.count() == 1 and await exit_button.is_visible()
+        signal = await self.read_detail()
+        if not has_exit and signal.get('ahead') is not None:
+            raise ValueError('網站仍顯示隊伍但退出入口尚未出現，請重新查看或重啟此帳號。')
+        await self.cancel_observer()
+        self.phase, self.note = 'leaving', '依目前視窗退出／返回列表，確認成功後重新監看。'
+        self.exit_available = self.refresh_available = False
+        self.persist()
+        try:
+            if has_exit:
+                await exit_button.click(timeout=8000, no_wait_after=True)
+                dialog = self.page.locator('#customConfirm')
+                await dialog.wait_for(state='visible', timeout=8000)
+                text = await dialog.inner_text()
+                if 'くじ箱選択へ戻りますか' not in text or '順番待ち' not in text:
+                    raise ValueError('網站確認視窗內容不符，未自動同意。')
+                await dialog.get_by_role('button', name='はい', exact=True).click(timeout=8000, no_wait_after=True)
+                await self.page.wait_for_url(lambda url: urlparse(str(url)).netloc == 'on-line.1kuji.com'
+                    and urlparse(str(url)).path == LIST_PATH
+                    and parse_qs(urlparse(str(url)).query).get('pid',[''])[0] == config['pid'], timeout=15000)
+            elif current.path == DETAIL_PATH:
+                await self.page.goto(config['url'],wait_until='domcontentloaded',timeout=15000)
+            await self.page.wait_for_load_state('domcontentloaded', timeout=15000)
+            parse_boxes(await self.page.content())
+            text = await self.page.locator('body').inner_text()
+            if parse_detail_text(text)['ahead'] is not None:
+                raise ValueError('頁面仍顯示個人隊伍，未重新啟動。')
+            exit_button = self.page.locator('[id$="_lbExitQueue"]')
+            if await exit_button.count() and await exit_button.is_visible():
+                raise ValueError('頁面仍有退出排隊按鈕，未重新啟動。')
+            self.clear_queue_state()
+            self.phase, self.note = 'idle', '已確認回到列表，重新建立監看基準。'
+            self.persist()
+            self.event('已確認離開目前箱／舊隊伍，重新監看')
+            await self.start(config)
+            self.metrics['requeuedAt'] = now()
+            self.persist()
+        except Exception as e:
+            self.phase, self.note = 'uncertain', f'退出／重排未完成：{str(e)[:220]}；可重新查看或重啟此帳號。'
+            self.persist()
+            self.event(self.note)
+            raise ValueError(self.note) from e
+
+    async def stop(self):
+        if self.phase != 'watching':
+            raise ValueError('只有監看中的任務可停止；不會代你退出既有隊伍。')
+        self.cancel.set()
+        if self.task:
+            self.task.cancel()
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                pass
+            self.task = None
+        self.phase, self.note, self.next_check = 'idle', '已停止監看。', None
+        self.persist()
+        self.event(self.note)
+
+    async def reset(self):
+        if self.phase not in {'uncertain','waiting','ready'}:
+            raise ValueError('目前不能結束任務，請先停止監看或等候排隊結果。')
+        self.cancel.set()
+        if self.task:
+            await self.task
+        self.phase, self.note = ('idle' if self.page and not self.page.is_closed() else 'closed'), '已結束助手任務；網站隊伍不會因此取消。'
+        self.target, self.queue_no, self.next_check = None, None, None
+        self.queue_ahead, self.inventory = None, {}
+        self.exit_available = self.refresh_available = False
+        self.persist()
+        self.event(self.note)
+
+
+class Manager:
+    def __init__(self, runtime):
+        self.runtime = Path(runtime)
+        self.runtime.mkdir(parents=True, exist_ok=True)
+        self.token = secrets.token_urlsafe(32)
+        self.playwright = None
+        self.browser_lock = asyncio.Lock()
+        self.exit_requested = asyncio.Event()
+        self.shutting_down = False
+        self.accounts = {i:Account(self, i) for i in 'ABC'}
+
+    async def shutdown(self):
+        # Finish queues before shutdown: stopping the browser driver can close
+        # managed windows or interrupt the website's queue connection.
+        for a in self.accounts.values():
+            a.cancel.set()
+        tasks = [a.task for a in self.accounts.values() if a.task]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        # Close all aiohttp sessions cleanly.
+        for a in self.accounts.values():
+            if a.http_session and not a.http_session.closed:
+                await a.http_session.close()
+        if self.playwright:
+            await self.playwright.stop()
+
+
+def create_app(manager):
+    @web.middleware
+    async def security(request, handler):
+        if request.host not in {'127.0.0.1:18766', 'localhost:18766'}:
+            raise web.HTTPForbidden(text='Invalid host')
+        origin = request.headers.get('Origin')
+        if origin and origin not in {'http://127.0.0.1:18766','http://localhost:18766'}:
+            raise web.HTTPForbidden(text='Invalid origin')
+        if request.path.startswith('/api/') and not secrets.compare_digest(request.headers.get('Authorization',''), 'Bearer '+manager.token):
+            raise web.HTTPUnauthorized(text='Invalid session')
+        try:
+            response = await handler(request)
+        except web.HTTPException:
+            raise
+        except (ValueError, KeyError, TypeError) as e:
+            response = web.json_response({'error':str(e)}, status=400)
+        except Exception as e:
+            response = web.json_response({'error':str(e)[:300]}, status=500)
+        response.headers.update({'Cache-Control':'no-store', 'X-Content-Type-Options':'nosniff',
+            'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'", 'Referrer-Policy':'no-referrer'})
+        return response
+    app = web.Application(middlewares=[security], client_max_size=8192)
+
+    async def state(request):
+        try:
+            discord = json.loads((manager.runtime/'discord-status.json').read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            discord = {'enabled':False}
+        return web.json_response({'version':'1.4.0', 'accounts':[a.state() for a in manager.accounts.values()], 'notifications':discord})
+
+    async def action(request):
+        if manager.shutting_down:
+            raise ValueError('服務正在重新啟動，請稍候。')
+        data = await request.json()
+        ident, command = data.get('id'), data.get('action')
+        if ident not in manager.accounts:
+            raise ValueError('帳號無效。')
+        a = manager.accounts[ident]
+        async with a.lock:
+            if command == 'open':
+                async with manager.browser_lock:
+                    if manager.playwright is None:
+                        manager.playwright = await async_playwright().start()
+                await a.open(data)
+            elif command == 'start':
+                await a.start(data)
+            elif command == 'navigate':
+                await a.navigate_list(data)
+            elif command == 'stop':
+                await a.stop()
+            elif command == 'requeue':
+                if data.get('confirmed') is not True:
+                    raise ValueError('請確認放棄目前隊伍並重新監看。')
+                await a.leave_and_requeue()
+            elif command == 'inspect':
+                await a.inspect_current()
+            elif command == 'restart':
+                if data.get('confirmed') is not True:
+                    raise ValueError('請確認重啟此帳號視窗可能中斷目前隊伍。')
+                async with manager.browser_lock:
+                    if manager.playwright is None:
+                        manager.playwright = await async_playwright().start()
+                await a.restart_account(data)
+            elif command == 'inventory':
+                await a.refresh_inventory()
+            elif command == 'reset':
+                if data.get('confirmed') is not True:
+                    raise ValueError('請確認已檢查網站狀態。')
+                await a.reset()
+            elif command == 'focus':
+                await a.focus_window()
+            elif command == 'label':
+                a.label = str(data.get('label','')).strip()[:24] or f'帳號 {ident}'
+                a.persist()
+            else:
+                raise ValueError('未知操作。')
+        return web.json_response({'ok':True, 'account':a.state()})
+
+    async def control(request):
+        data = await request.json()
+        if data.get('action') != 'shutdown' or data.get('confirmed') is not True:
+            raise ValueError('請確認停止服務可能中斷專用視窗與隊伍。')
+        manager.shutting_down = True
+        asyncio.get_running_loop().call_later(0.3, manager.exit_requested.set)
+        return web.json_response({'ok':True})
+
+    async def static(request):
+        name = request.match_info.get('name') or 'index.html'
+        if name not in {'index.html','app.js','style.css'}:
+            raise web.HTTPNotFound()
+        return web.FileResponse(HERE / 'web' / name)
+    app.router.add_get('/api/state', state)
+    app.router.add_post('/api/action', action)
+    app.router.add_post('/api/control', control)
+    app.router.add_get('/', static)
+    app.router.add_get('/{name}', static)
+    async def cleanup(app):
+        await manager.shutdown()
+    app.on_cleanup.append(cleanup)
+    return app
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--runtime', type=Path, default=DEFAULT_RUNTIME)
+    parser.add_argument('--no-browser', action='store_true')
+    args = parser.parse_args()
+    args.runtime.mkdir(parents=True, exist_ok=True)
+    spawn_notifier(args.runtime)
+    session_file = args.runtime / 'panel-session.json'
+    if session_file.exists():
+        try:
+            existing = json.loads(session_file.read_text(encoding='utf-8'))
+            request = Request('http://127.0.0.1:18766/api/state', headers={'Authorization':'Bearer '+existing['token']})
+            with urlopen(request, timeout=2) as response:
+                if response.status == 200:
+                    existing_url = 'http://127.0.0.1:18766/#' + existing['token']
+                    print('Kuji Manager: ' + existing_url, flush=True)
+                    if not args.no_browser:
+                        webbrowser.open(existing_url)
+                    return
+        except Exception:
+            pass
+    manager = Manager(args.runtime)
+    url = 'http://127.0.0.1:18766/#' + manager.token
+    async def open_panel(app):
+        session_file.write_text(json.dumps({'token':manager.token}), encoding='utf-8')
+        (args.runtime / 'manager.pid').write_text(str(os.getpid()), encoding='utf-8')
+        print('Kuji Manager: ' + url, flush=True)
+        if not args.no_browser:
+            asyncio.get_running_loop().call_later(1, webbrowser.open, url)
+    app = create_app(manager)
+    app.on_startup.append(open_panel)
+    async def serve():
+        runner = web.AppRunner(app, access_log=None)
+        await runner.setup()
+        try:
+            await web.TCPSite(runner, host='127.0.0.1', port=18766).start()
+            await manager.exit_requested.wait()
+        finally:
+            await runner.cleanup()
+    try:
+        asyncio.run(serve())
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == '__main__':
+    main()
