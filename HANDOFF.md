@@ -11,12 +11,12 @@
 | 任務ID | 標題 | 負責 | 狀態 | 依賴 | 最後更新紀錄 |
 |---|---|---|---|---|---|
 | T-001 | 讀取並驗證 repo，回報架構 | 製作A | 完成 | — | H-002 |
-| T-001b | Vercel / Firebase 用途確認（技術棧不符） | 人類 | 阻塞 | T-001 | H-002 |
-| T-001c | 合併協作檔與既有 AGENTS.md，修正 source 殘字 | 製作A | 待審 | T-001 | H-003 |
+| T-001b | Vercel / Firebase 用途確認 → 決定不採用 | 人類 | 完成 | T-001 | H-005 |
+| T-001c | 合併協作檔與既有 AGENTS.md，修正 source 殘字 | 製作A | 完成 | T-001 | H-005 |
 | T-002 | 審查 native_ui.py 現有 Tk 介面，產出 design/tokens.md 與畫面規格 | 設計B | 待辦 | T-001c | H-003 |
 | T-003 | 盤點介面文字與 DC 通知文案，改寫第一次使用教學 | 寫手C | 待辦 | T-001c | H-003 |
 | T-004 | 更新過時測試契約，恢復可跑的回歸 | 製作A | 待辦（需人類同意跑測試） | T-001c | H-002 |
-| T-005 | 併入 Ponytail 程式精簡原則為 AGENTS.md 第 9 節 | 製作A | 待審 | T-001c | H-004 |
+| T-005 | 併入 Ponytail 程式精簡原則為 AGENTS.md 第 9 節 | 製作A | 完成 | T-001c | H-005 |
 
 狀態：`待辦` / `進行中` / `待審` / `完成` / `阻塞`
 
@@ -128,3 +128,20 @@
   - 人類：確認第 9 節內容與 ultra 強度；並回覆 T-001b 的 Vercel / Firebase 決定。
   - 設計B、寫手C：開工前重讀 `AGENTS.md`，注意新增的第 9 節與第 9.9 節對你的適用方式。
 - 狀態：待審
+
+### H-005 ｜ 2026-11-25 21:08 ｜ 寄件：製作A → 收件：人類、設計B、寫手C
+- 類型：狀態更新
+- 任務：T-001b、T-001c、T-005
+- 引用：H-002、H-003、H-004
+- 內容：
+  - 人類決定：**不採用 Vercel 與 Firebase**。本專案維持純本機桌面應用，發布走 GitHub Release。T-001b 結案。
+  - `AGENTS.md` 第 0 節部署欄已定案，移除「用途未定」字樣，不再指向 T-001b。
+  - 人類核准 T-001c 與 T-005，兩者結案。
+  - `dev` 已合併進 `main`，B 與 C 可直接從 `main` 讀取新規則。
+- 改動檔案：
+  - `AGENTS.md`（部署欄定案、版本紀錄追加一列）
+  - `HANDOFF.md`（本紀錄、看板狀態更新）
+- 需要對方做什麼：
+  - 設計B：開始 T-002。讀 `source/native_ui.py` 與 `source/AI_CONTEXT.md`，產出 `design/tokens.md` 與 `design/screens/` 畫面規格。沿用既有深色 clam 主題，不修改 `source/`。
+  - 寫手C：開始 T-003。盤點 `source/native_ui.py` 介面字串與 `source/notifications.py` 通知文案，產出 `content/ui-strings.md`，並提出 `source/使用說明.md` 的改寫版放 `content/`。不修改 `source/`。
+- 狀態：完成

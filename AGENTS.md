@@ -17,7 +17,7 @@
 | 技術棧 | Python 3.13 / Tkinter / Playwright 1.65.2（CDP 接管既有 Chrome）/ aiohttp 3.14.5 / BeautifulSoup 4.15.0 |
 | 版本 | UI／分享包 **1.5.34**；服務相容 **VERSION=1.5.30**（刻意分離，不是故障） |
 | 入口 | `source/desktop.py` |
-| 部署 | 本機執行 + GitHub Release 發布 EXE。**Vercel / Firebase 用途未定，見 HANDOFF T-001b** |
+| 部署 | 本機執行 + GitHub Release 發布 EXE。**不使用任何雲端服務**（人類 2026-11-25 決定不採用 Vercel / Firebase） |
 | 專案負責人（人類） | eason66225 — 擁有最終決定權 |
 
 ---
@@ -243,3 +243,4 @@
 |---|---|---|
 | 2026-11-25 | 製作A | 建立三方協作總則，合併既有專案維護規範（原根目錄 AGENTS.md 內容全數保留於第 5 節） |
 | 2026-11-25 | 製作A | 新增第 9 節程式精簡原則（Ponytail，MIT，改寫自 DietrichGebert/ponytail），原版本紀錄改為第 10 節 |
+| 2026-11-25 | 製作A | 人類決定不採用 Vercel / Firebase，部署欄定案為純本機 + GitHub Release |
