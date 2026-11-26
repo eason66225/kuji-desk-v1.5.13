@@ -21,6 +21,10 @@ RED='#e05252'; GREEN='#38a169'
 # T-007: 綠／紅底按鈕的文字色。白字對比僅 3.25:1／3.82:1，低於 WCAG AA 4.5:1；
 # 改用此深色後分別約 5.65:1／4.80:1。
 ON_ACCENT='#10151c'
+# T-009: 監看鈕停用時的中性底與文字。沿用綠／紅底配共用灰字只有 1.40:1／1.19:1，
+# 幾乎讀不到；改用這組後為 5.44:1，並以一般游標表明不可操作。
+DISABLED_BG='#283648'
+DISABLED_FG='#A0AEC0'
 COLORS={'A':'#8bb9ff','B':'#d7f896','C':'#ffbe84'}
 
 
@@ -120,6 +124,7 @@ class NativeUI:
         self.pool=ThreadPoolExecutor(max_workers=5);self.results=queue.Queue()
         self.service_version=None
         self.accounts={};self.cards={};self.busy=set();self.polling=False;self.closed=False
+        self.monitor_color={}  # T-009：記住每張卡監看鈕當下該用的綠或紅
         try:
             self.cloudflare_popups=json.loads((self.runtime/'cloudflare-popups.json').read_text(encoding='utf-8'))
         except (OSError,ValueError):
@@ -173,6 +178,15 @@ class NativeUI:
         kwargs.setdefault('anchor','w')
         return tk.Label(parent,text=text,textvariable=var,bg=parent.cget('bg'),fg=color,
                         font=('Microsoft JhengHei UI',size,'bold' if bold else 'normal'),**kwargs)
+
+    def style_toggle(self, b, enabled, color=None):
+        """T-009：監看類切換鈕的啟用／停用外觀。停用時改中性底，避免綠／紅底配灰字讀不到。"""
+        if enabled:
+            b.config(state='normal', bg=color, activebackground=color,
+                     fg=ON_ACCENT, activeforeground=ON_ACCENT, cursor='hand2')
+        else:
+            b.config(state='disabled', bg=DISABLED_BG, activebackground=DISABLED_BG,
+                     disabledforeground=DISABLED_FG, cursor='arrow')
 
     def button(self,parent,text,command,primary=False,bg=None,fg=None):
         btn_bg = bg or (LIME if primary else '#283648')
@@ -568,6 +582,8 @@ class NativeUI:
                 c['buttons']['open'].config(text='連接 Chrome',state='normal' if ident not in self.busy else 'disabled')
                 for action in ('monitor','inspect','requeue','rename'):
                     c['buttons'][action].config(state='disabled')
+                # T-009：沒有帳號資料時，監看鈕不可留著前次的綠／紅底
+                self.style_toggle(c['buttons']['monitor'], False)
                 continue
             a = self.accounts[ident]
             c=self.cards[ident];c['title'].config(text=f'{ident}   '+a['label']);c['phase'].config(text='●  '+a['phaseLabel'],fg=LIME if a['phase']=='ready' else '#ffbe84' if a['phase']=='uncertain' else MUTED)
@@ -597,19 +613,21 @@ class NativeUI:
             is_monitoring = bool(a.get('canStop'))
             c['buttons']['monitor'].config(
                 text='停止監看' if is_monitoring else '開始監看',
-                bg=RED if is_monitoring else GREEN,
-                fg=ON_ACCENT,
-                activebackground=RED if is_monitoring else GREEN,
-                activeforeground=ON_ACCENT,
                 font=('Microsoft JhengHei UI',10,'bold')
             )
+            self.monitor_color[ident] = RED if is_monitoring else GREEN
             c['buttons']['open'].config(text='切回視窗' if a.get('opened') else '連接 Chrome')
             enabled={'open':True,'monitor':a.get('canStart') or a.get('canStop'),
                      'inspect':a.get('canInspect'),
                      'requeue':not login_only and a.get('opened') and a['phase'] not in {'watching','opening','submitting','leaving'},
                      'restart':True,
                      'rename':True}
-            for action,b in c['buttons'].items():b.config(state='normal' if enabled[action] and ident not in self.busy else 'disabled')
+            for action,b in c['buttons'].items():
+                on = bool(enabled[action]) and ident not in self.busy
+                if action=='monitor':
+                    self.style_toggle(b, on, self.monitor_color.get(ident, GREEN))
+                else:
+                    b.config(state='normal' if on else 'disabled')
 
     def choose_chrome_profile(self, ident):
         existing = getattr(self, 'profile_dialog', None)
