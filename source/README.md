@@ -1,7 +1,7 @@
 # Kuji Desk · suto 1 ban kuji
 
 Windows 桌面工具，用同一個總控管理最多三個已登入的一番賞 Chrome 設定檔。
-目前介面與分享版為 **v1.5.34**，相容服務版本為 **v1.5.30**。
+目前來源／最新分享版為 **v1.5.37**，內含服務 **v1.5.37**；本機服務仍為 **v1.5.30**，僅通知程序已更新36。GitHub公開版仍為 **v1.5.34**。套用狀態見 [AI_CONTEXT.md](AI_CONTEXT.md)，模組與資料流見 [架構說明](ARCHITECTURE.md)。
 
 ## 開始使用
 
@@ -35,7 +35,7 @@ python -m venv .venv
 .venv/Scripts/python build_exe.py --share
 ```
 
-產物為上一層 `KujiDesk-share-v1.5.34/KujiDesk.exe`。使用已安裝的 Google Chrome，不需下載 Playwright 的 Chromium。
+產物為上一層 `KujiDesk-share-v1.5.37/KujiDesk.exe`。使用已安裝的 Google Chrome，不需下載 Playwright 的 Chromium。
 
 既有回歸入口：`python -m unittest test_manager test_login_store test_notifications test_entry_tabs test_service_runtime`。部分測試仍反映舊瀏覽器契約，不能宣稱最新版全套通過；依使用者要求，近期沒有執行離線／模擬測試。現版已做語法檢查、打包、實際 Chrome 查箱及介面檢查、Discord 實際傳送測試；完整驗證範圍見 [AI_CONTEXT.md](AI_CONTEXT.md)。
 

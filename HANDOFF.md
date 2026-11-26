@@ -28,6 +28,9 @@
 | T-004 | 更新過時測試契約，恢復可跑的回歸 | 製作A | 待辦（需人類同意跑測試） | T-001c | H-002 |
 | T-005 | 併入 Ponytail 程式精簡原則為 AGENTS.md 第 9 節 | 製作A | 完成 | T-001c | H-005 |
 
+| T-011 | 併入 Codex 的 v1.5.35～37，確立 GitHub 為唯一來源 | 製作A | 待審 | T-010 | H-019 |
+| T-012 | 設計B 角色放寬為可受指派開發 | 製作A | 完成 | — | H-019 |
+
 狀態：`待辦` / `進行中` / `待審` / `完成` / `阻塞`
 
 ---
@@ -416,4 +419,34 @@
   - 修改：`source/manager.py`、`source/test_manager.py`、`source/AGENTS.md`、`AGENTS.md`、`SOURCE-SHA256.json`、`HANDOFF.md`
 - 需要對方做什麼：
   - 人類：剩餘 7 項的處理方式，見下一則說明（3 項行為差異、3 項架構已變、1 項需 Windows 實機）。
+- 狀態：待審
+
+### H-019 ｜ 2026-11-26 10:30 ｜ 寄件：製作A → 收件：人類、設計B
+- 類型：交付
+- 任務：T-011、T-012
+- 引用：H-018
+- 內容：
+  - **發現兩邊分岔。** 人類索取最新 EXE 時查出：設計B（Codex）在 `Documents\Codex\PrintLab\work\kuji-manager` 持續開發到 v1.5.37 並已建置 v1.5.35／36／37，但這些改動從未進入 GitHub。Codex 自己的 `CODEX_PROGRESS.md` 也寫明「GitHub 仍 34」。製作A 今天的全部工作（T-006／T-007／T-010／T-004b）則只做在 GitHub 這份 v1.5.34 快照上。
+  - 人類裁示：**以 GitHub 為唯一來源**，且由製作A 直接推送合併結果，不再請 Codex 重做。
+  - **以 `e5eac0a` 為共同起點做三方合併，五個程式檔與 `source/AGENTS.md` 全部零衝突**，兩邊改動不重疊：
+    | 檔案 | 製作A | 設計B | 衝突 |
+    |---|---|---|---|
+    | `manager.py` | 70 行 | 186 行 | 0 |
+    | `native_ui.py` | 63 行 | 4 行 | 0 |
+    | `notifications.py` | 22 行 | 19 行 | 0 |
+    | `details.py`／`build_exe.py` | 0 行 | 6 行 | 0 |
+  - 合併後逐項驗證：`py_compile` 通過；版本正確保留設計B 的 **1.5.37**；Cloudflare 耦合字串兩檔仍完全一致；命名統一全數保留（舊詞歸零）；`login_store`／`load_home` 維持刪除（設計B 那份仍留著，合併後正確移除）。
+  - **測試從 7 項問題降為 6 項**：`test_official_page_reload_retries_observation_without_submission` 已自行通過，代表設計B 在 v1.5.35～37 期間修好了該狀態標籤問題。目前 **69 項中 63 通過**。
+  - 另取入設計B 單方面更新的 `README.md`，並新增其建立的 `ARCHITECTURE.md`（repo 原本沒有）。`KujiDesk.spec` 為 PyInstaller 產生物且 `.gitignore` 已排除，不納入。
+  - 版本號衝突處理：製作A 原將死碼移除標為 v1.5.35，與設計B 已使用的 v1.5.35 相撞，已改標為 **v1.5.38**。
+  - `SOURCE-SHA256.json` 由 38 檔增為 **39 檔**（新增 ARCHITECTURE.md），全部核對相符。
+  - **T-012 角色放寬**：人類核准設計B 不限於 UI，製作A 得視需要指派開發任務。`AGENTS.md` 第 1、2、4 節已更新——受指派開發時適用與製作A 相同的規範，工作分支改用 `feature/<任務ID>`，且**指派紀錄必須明寫「授權修改 source/」與檔案範圍**，未寫明者仍只能動 `/design`。合併到 `main` 的權限仍僅限製作A。
+  - **未執行**：未重新打包 EXE（PyInstaller 需在 Windows 執行，製作A 在 Linux 容器無法跨平台建置），未重啟服務，未操作瀏覽器或隊伍。
+- 改動檔案：
+  - `source/manager.py`、`source/native_ui.py`、`source/notifications.py`、`source/details.py`、`source/build_exe.py`、`source/AGENTS.md`、`source/README.md`
+  - 新增 `source/ARCHITECTURE.md`
+  - `AGENTS.md`、`SOURCE-SHA256.json`、`HANDOFF.md`
+- 需要對方做什麼：
+  - 人類：要產生含今日改動的 EXE，需在 Windows 執行 `python build_exe.py --share`。現行 v1.5.37 EXE 不含今日改動。
+  - 人類：`work\kuji-manager` 之後請改為從 GitHub 更新，避免再次分岔。
 - 狀態：待審

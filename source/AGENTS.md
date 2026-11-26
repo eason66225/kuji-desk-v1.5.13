@@ -1,12 +1,18 @@
 # Kuji 管理程式工作規範
 
-## 現版優先（v1.5.34）
+## 現版優先（來源 v1.5.37）
 
-下方逐版條目保留作歷史參考；現版以 AI_CONTEXT.md 為準。使用 CDP 接管既有 Chrome，以 browserContextId 區分真實設定檔，不關閉外部 context；不使用專用 persistent profile。UI_VERSION=1.5.34、服務 VERSION=1.5.30。查箱為頁內 fetch；Cloudflare 通知與彈窗各自可選。發布至既有 GitHub，維持程式來源與分享 EXE 對應，排除所有 Runtime 與私人設定。
+v1.5.36 一般 uncertain DC 通知需同箱同原因穩定15秒；去重依帳號／商品／箱號，不依每次重排的 startedAt。復原即取消待發；repeat_enabled 仍控制持續異常的重複提醒。Cloudflare、ready、售完不受15秒延遲影響。可只更新通知程序，相容目前服務30；不可因此擅自套用待批准的服務35。
 
+v1.5.35 待套用修正：READ_DETAIL 同時辨識可見 lbMoveToCartFlow 與「N分以内にくじを引いてください」，不只看 customAlert。輪到且沒有退出入口時，requeue 改用可停止的背景等待；網站返回同商品列表／提供退出入口才接續，不以 goto 假裝釋放名額。未知提示不自動同意，變更商品／箱號或 Cloudflare 即停止；禁止強制離開購買流程。
+
+下方逐版條目保留作歷史參考；現版以 AI_CONTEXT.md 為準。使用 CDP 接管既有 Chrome，以 browserContextId 區分真實設定檔，不關閉外部 context；不使用專用 persistent profile。來源 UI_VERSION=1.5.37、服務 VERSION=1.5.37；實際執行版本見 AI_CONTEXT.md。查箱為頁內 fetch；Cloudflare 通知與彈窗各自可選。發布至既有 GitHub，維持程式來源與分享 EXE 對應，排除所有 Runtime 與私人設定。
+
+
+- v1.5.37 查詢使用原profile頁內fetch：順位POST GetLotteryBoxWaitCount解析d.your_waiting_no；庫存GET箱頁解析HTML，不複製Cookie。手動更新也查順位；最新順位30秒內優先於DOM，切箱清queueApiAt與庫存。查詢失敗保留數值且分類節流日誌；實站唯讀驗證不可以觸發離箱或排隊。
 
 ## 最短接手流程
-1. 讀 `AI_CONTEXT.md`（架構、已驗證行為、待修問題）。使用介面問題查 `使用說明.md`。
+1. 讀 `AI_CONTEXT.md`（版本、套用狀態與驗證限制）。需要資料流／模組責任才讀 `ARCHITECTURE.md`；操作查 `使用說明.md`；暫時進度見 `CODEX_PROGRESS.md`。
 2. 用 `rg` 定位相關函式，只讀相關段落；不要預設讀整份 HANDOFF、Runtime、聊天或 PrintLab 文件。
 3. 用既有 venv，做最小必要修改與有意義的測試。來源碼、EXE、正在執行的服務是三個不同狀態。
 4. 更新 `AI_CONTEXT.md` 的現況／待辦；重大決策再追加 HANDOFF。回覆變更、驗證、是否套用，使用繁體中文、簡短清楚。
@@ -91,6 +97,6 @@
 
 - v1.5.32 通知程序使用 check_cloudflare 既有的明確 note 與同訊息事件 at 辨識驗證；按帳號與事件時間去重，不套用一般重複通知，也不再發同次 uncertain 通知。支援 v1.5.30 服務，可僅換通知程序而保留監看／Chrome。通知測試必須明示為測試，不宣稱實際發生驗證。
 
-- v1.5.35 正式移除兩項已無呼叫點的功能：login_store 登入快照（接管既有 Chrome 後，登入狀態由使用者自己的 Chrome 保存，不另存加密副本）與 Account.load_home 自動導向首頁（接管既有分頁後不得擅自導覽，避免洗掉排隊頁）。同時移除對應的 test_login_store 與 test_manager 的三項測試。若日後需要，於 becf7a9 之前的 commit 可取回。
+- v1.5.38 正式移除兩項已無呼叫點的功能：login_store 登入快照（接管既有 Chrome 後，登入狀態由使用者自己的 Chrome 保存，不另存加密副本）與 Account.load_home 自動導向首頁（接管既有分頁後不得擅自導覽，避免洗掉排隊頁）。同時移除對應的 test_login_store 與 test_manager 的三項測試。若日後需要，於 becf7a9 之前的 commit 可取回。
 
 - v1.5.34 的 Discord 設定增加 cloudflare_enabled（舊設定預設 true）及 cloudflare_popup（預設 false）；後者與 DC 啟用無關，只在 GUI 開啟時輪詢提示。兩者共用 notifications.cloudflare_event_key；提示為非模態 Toplevel，不阻塞輪詢，已提示事件寫入本機 cloudflare-popups.json，不能打包或上傳。

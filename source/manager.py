@@ -72,6 +72,25 @@ FETCH_BOX_HTML = """async (url) => {
     }
 }"""
 ACTIVE = {'watching', 'opening', 'submitting', 'waiting', 'ready', 'uncertain', 'leaving'}
+FETCH_QUEUE_JSON = r'''async (expectedUrl) => {
+    if (location.href !== expectedUrl) throw new Error('分頁網址已變更');
+    const user = document.documentElement.innerHTML.match(/userId\s*:\s*['"]([^'"]{1,80})['"]/);
+    if (!user) throw new Error('頁面未提供查詢身分');
+    const url = new URL(location.href);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+        const response = await fetch(url.origin + url.pathname + '/GetLotteryBoxWaitCount', {
+            method: 'POST', credentials: 'include', cache: 'no-store', signal: controller.signal,
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({userId:user[1], productId:url.searchParams.get('pid'),
+                                  hashedDisplayId:url.searchParams.get('lbdid')})
+        });
+        return {status:response.status, url:response.url,
+                headers:{'cf-mitigated':response.headers.get('cf-mitigated') || ''},
+                text:await response.text()};
+    } finally { clearTimeout(timeout); }
+}'''
 LABELS = {'closed':'未開啟', 'idle':'待命', 'watching':'監看新箱', 'opening':'開啟箱子',
           'recovering':'等待入場', 'leaving':'退出並重排中', 'submitting':'已觸發排隊', 'waiting':'已確認排隊', 'ready':'輪到你了', 'uncertain':'需要確認'}
 
@@ -700,7 +719,47 @@ class Account:
         return boxes
 
     async def api_wait_count(self):
-        return {}
+        if self.cloudflare_paused or not self.matches_target():
+            return {}
+        page, source = self.page, self.page.url
+        try:
+            response = await page.evaluate(FETCH_QUEUE_JSON, source)
+            if self.page is not page or page.url != source or not self.matches_target():
+                return {}
+            self.check_cloudflare(headers=response['headers'])
+            self.check_cloudflare(BeautifulSoup(response['text'], 'html.parser').get_text(' '))
+            endpoint = ORIGIN + DETAIL_PATH + '/GetLotteryBoxWaitCount'
+            if response['status'] != 200 or response['url'] != endpoint:
+                raise ValueError('順位查詢回應不符')
+            data = json.loads(response['text']).get('d')
+            if isinstance(data, str):
+                data = json.loads(data)
+            value = data.get('your_waiting_no') if isinstance(data, dict) else None
+            if isinstance(value, bool) or not re.fullmatch(r'\d+', str(value)):
+                raise ValueError('順位查詢沒有有效個人順位')
+            ahead = int(value)
+            self.metrics['queueApiAt'] = now()
+            if self.phase in {'submitting','waiting','uncertain'}:
+                changed = self.queue_ahead != ahead or self.phase != 'waiting'
+                self.queue_no = self.queue_ahead = ahead
+                self.phase, self.note = 'waiting', '已確認個人順位；請保持視窗連線。'
+                self.metrics.setdefault('confirmedAt', now())
+                self.metrics['lastQueueAt'] = now()
+                if changed:
+                    self.event(f'前方還有 {ahead} 人')
+                self.persist()
+            return {'ahead':ahead}
+        except CloudflarePaused:
+            raise
+        except (PlaywrightError, ValueError, TypeError, AttributeError):
+            self.log_query_failure('順位')
+            return {}
+
+    def log_query_failure(self, kind):
+        key = kind+'QueryErrorAt'
+        if now() - self.metrics.get(key, 0) >= 60000:
+            self.metrics[key] = now()
+            self.event(kind+'查詢暫未取得有效資料，保留上次數值；請檢查登入、網站訊息或連線。')
 
     async def start(self, data):
         if self.phase not in {'idle','closed'}:
@@ -803,6 +862,7 @@ class Account:
         self.exit_available = self.refresh_available = False
         self.queue_alert, self.queue_reason = False, None
         self.soldout_attempt = None
+        self.metrics.pop('queueApiAt', None)
 
     async def reconcile_queue_page(self, signal):
         current = signal.get('url')
@@ -838,6 +898,8 @@ class Account:
             if re.fullmatch(r'[0-9A-Fa-f]{16}', ident) and re.fullmatch(r'[A-Za-z0-9_]{1,80}',pid):
                 if ident != (self.target or {}).get('id'):
                     self.target = {'id':ident.upper(),'seq':None}
+                    self.inventory = {}
+                    self.metrics.pop('queueApiAt', None)
                     self.queue_no = self.queue_ahead = None
                     self.metrics.pop('readyAt',None)
                     self.queue_alert = False
@@ -1021,37 +1083,30 @@ class Account:
         await self.observe_queue()
 
     async def _api_poll_loop(self):
-        """Background task: poll GetLotteryBoxWaitCount every 10 s and sync inventory via API.
-
-        This ensures queue position and remaining tickets are always authoritative
-        and fresh from API, and never overridden by stale static DOM text.
-        """
+        """Read queue JSON every 10 s and inventory HTML every 180 s through the logged-in page."""
         POLL_INTERVAL = 10.0
         last_inv_api = 0.0
         while not self.cancel.is_set():
             if self.phase in {'submitting', 'waiting', 'ready'}:
                 # 1. Poll API wait count
-                result = await self.api_wait_count()
-                ahead = result.get('ahead')
-                if ahead is not None and self.phase not in {'ready'}:
-                    if self.queue_ahead != ahead or self.phase != 'waiting':
-                        self.queue_no = ahead
-                        self.queue_ahead = ahead
-                        self.phase, self.note = 'waiting', '已確認個人順位；請保持視窗連線。'
-                        self.metrics.setdefault('confirmedAt', now())
-                        self.metrics['lastQueueAt'] = now()
-                        self.persist()
-                        self.event(f'前方還有 {ahead} 人')
+                try:
+                    await self.api_wait_count()
+                except CloudflarePaused:
+                    return
+                if self.cancel.is_set():
+                    return
 
                 # 2. Automatically refresh inventory via API every 3 minutes (180s)
                 # or immediately if not yet queried from API
                 now_mono = time.monotonic()
-                if now_mono - last_inv_api >= 180 or self.inventory.get('source') != 'api':
+                if last_inv_api == 0 or now_mono - last_inv_api >= 180:
                     last_inv_api = now_mono
                     try:
                         await self.query_inventory_api()
+                    except CloudflarePaused:
+                        return
                     except Exception:
-                        pass
+                        self.log_query_failure('庫存')
 
             try:
                 await asyncio.wait_for(self.cancel.wait(), timeout=POLL_INTERVAL)
@@ -1060,13 +1115,7 @@ class Account:
                 pass
 
     async def observe_queue(self):
-        """Watch queue state from both browser DOM and API polling.
-
-        When the browser window is open the DOM path runs as before.
-        In parallel, _api_poll_loop provides position updates via HTTP so the
-        manager stays informed even if the browser is minimised or closed after
-        the queue button was clicked.
-        """
+        """Combine visible queue signals with same-profile requests; keep the browser page open."""
         pending_since = time.monotonic()
         navigation_errors = 0
         # Launch the API polling companion task.
@@ -1169,7 +1218,8 @@ class Account:
             if not self.inventory or self.inventory.get('source') != 'api':
                 self.inventory = {k:v for k,v in info.items() if k != 'ahead'}
                 self.inventory['readAt'] = now()
-        signal['ahead'] = info['ahead']
+        signal['ahead'] = (self.queue_ahead if now()-self.metrics.get('queueApiAt', 0) < 30000
+                           else info['ahead'])
         return signal
 
     def log_inventory_response(self, html, status, path):
@@ -1189,10 +1239,38 @@ class Account:
         current = urlparse(self.page.url)
         if current.netloc != 'on-line.1kuji.com' or current.path != DETAIL_PATH:
             return {}
-        if self.inventory.get('source') == 'api':
-            self.inventory = {}
-        await self.read_detail()
+        source, page = self.page.url, self.page
+        response = await page.evaluate(FETCH_BOX_HTML, source)
+        if self.page is not page or page.url != source:
+            return {}
+        self.check_cloudflare(headers=response['headers'])
+        self.check_cloudflare(BeautifulSoup(response['html'], 'html.parser').get_text(' '))
+        returned = urlparse(response['url'])
+        expected = parse_qs(current.query)
+        actual = parse_qs(returned.query)
+        if (response['status'] != 200 or returned.netloc != current.netloc or returned.path != DETAIL_PATH
+                or any(actual.get(key) != expected.get(key) for key in ('pid','lbdid'))):
+            self.log_query_failure('庫存')
+            return {}
+        info = parse_detail_html(response['html'])
+        if info['remaining'] is None and not info['prizes']:
+            self.log_query_failure('庫存')
+            return {}
+        self.inventory = {k:v for k,v in info.items() if k != 'ahead'}
+        self.inventory.update(source='api', readAt=now())
+        if self.phase in {'submitting','waiting','ready','uncertain'}:
+            await self.api_wait_count()
+        if self.page is not page or page.url != source:
+            return {}
         self.persist()
+        self.event(f'已查詢最新籤數：剩餘 {info["remaining"]} 枚')
+        if info['remaining'] == 0 and self.target and self.matches_target():
+            key = (self.config.get('pid'), self.target['id'])
+            self.queue_reason, self.queue_alert = 'SoldOut', True
+            if (self.config.get('autoResumeSoldOut', True) and self.soldout_attempt != key
+                    and (not self.soldout_task or self.soldout_task.done())):
+                self.soldout_attempt = key
+                self.soldout_task = asyncio.create_task(self.resume_after_soldout(key))
         return self.inventory
 
     async def resume_after_soldout(self,key):
@@ -1280,6 +1358,39 @@ class Account:
                 and url.path == DETAIL_PATH and query.get('pid',[''])[0] == self.config.get('pid')
                 and query.get('lbdid',[''])[0] == self.target.get('id'))
 
+    async def wait_turn_then_requeue(self, config, box_id):
+        acknowledged = False
+        try:
+            while not self.cancel.is_set():
+                signal = await self.read_detail()
+                current = urlparse(signal['url'])
+                query = parse_qs(current.query)
+                if current.netloc != 'on-line.1kuji.com' or query.get('pid',[''])[0] != config['pid']:
+                    raise ValueError('已離開原商品，停止等待離箱。')
+                if current.path == LIST_PATH:
+                    async with self.lock:
+                        self.phase = 'idle'
+                        await self.leave_and_requeue()
+                    return
+                if current.path != DETAIL_PATH or query.get('lbdid',[''])[0] != box_id:
+                    raise ValueError('目前頁面或箱號已變更，停止等待離箱。')
+                if signal.get('exitVisible'):
+                    async with self.lock:
+                        self.phase = 'idle'
+                        await self.leave_and_requeue()
+                    return
+                if signal.get('paymentTimeout') and not acknowledged:
+                    acknowledged = True
+                    self.event('已要求離箱，確認網站明示的逾時取消後等待返回列表')
+                    await self.page.locator('#customAlert .ok-button').click(timeout=5000, no_wait_after=True)
+                await asyncio.sleep(1)
+        except CloudflarePaused:
+            return
+        except Exception as error:
+            self.phase, self.note = 'uncertain', '等待離箱未完成：'+str(error)[:200]
+            self.persist()
+            self.event(self.note)
+
     async def leave_and_requeue(self):
         if self.phase in {'watching','opening','submitting','leaving'} or not self.page or self.page.is_closed():
             raise ValueError('請先停止監看，或等候正在送出的操作完成。')
@@ -1294,6 +1405,16 @@ class Account:
         exit_button = self.page.locator('[id$="_lbExitQueue"]')
         has_exit = await exit_button.count() == 1 and await exit_button.is_visible()
         signal = await self.read_detail()
+        if current.path == DETAIL_PATH and not has_exit and signal.get('ready'):
+            await self.cancel_observer()
+            self.cancel = asyncio.Event()
+            self.config = config
+            self.phase, self.note = 'recovering', '已要求離箱；目前輪到你且網站沒有退出入口，等待網站釋放名額並返回列表後重新監看，可按停止取消。'
+            self.persist()
+            self.event(self.note)
+            box_id = parse_qs(current.query).get('lbdid',[''])[0]
+            self.task = asyncio.create_task(self.wait_turn_then_requeue(config, box_id))
+            return
         if not has_exit and signal.get('ahead') is not None:
             raise ValueError('網站仍顯示隊伍但退出入口尚未出現，請重新查看或重啟此帳號。')
         await self.cancel_observer()
@@ -1318,6 +1439,9 @@ class Account:
             await self.page.wait_for_load_state('domcontentloaded', timeout=15000)
             await self.wait_temporary_page()
             await self.follow_product_to_list()
+            returned = urlparse(self.page.url)
+            if returned.netloc != 'on-line.1kuji.com' or returned.path != LIST_PATH or parse_qs(returned.query).get('pid',[''])[0] != config['pid']:
+                raise ValueError('網站尚未返回同商品選箱列表，未啟動監看。')
             parse_boxes(await self.page.content())
             text = await self.page.locator('body').inner_text()
             if parse_detail_text(text)['ahead'] is not None:
@@ -1450,7 +1574,7 @@ def create_app(manager):
             discord = json.loads((manager.runtime/'discord-status.json').read_text(encoding='utf-8'))
         except (OSError, ValueError):
             discord = {'enabled':False}
-        return web.json_response({'version':'1.5.30', 'loginOnly':manager.login_only, 'accounts':[a.state() for a in manager.accounts.values()], 'notifications':discord})
+        return web.json_response({'version':'1.5.37', 'loginOnly':manager.login_only, 'accounts':[a.state() for a in manager.accounts.values()], 'notifications':discord})
 
     async def action(request):
         if manager.shutting_down:

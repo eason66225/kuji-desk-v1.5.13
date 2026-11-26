@@ -140,6 +140,7 @@ class Notifier:
             self.ledger = {}
         self.status = {'enabled':False, 'connected':False}
         self.stop = False
+        self.uncertain_since = {}
 
     def report(self, **values):
         self.status.update(values)
@@ -159,6 +160,21 @@ class Notifier:
     async def process(self, accounts, config, session):
         for account in accounts:
             phase=account.get('phase')
+            ident=account.get('id')
+            target=account.get('target') or {}
+            uncertain_key='uncertain:'+hashlib.sha256(json.dumps([
+                ident, (account.get('config') or {}).get('pid'),
+                target.get('id') or target.get('seq') or 'no-box'
+            ],sort_keys=True).encode()).hexdigest()
+            if phase == 'uncertain':
+                signature=(uncertain_key, account.get('note'))
+                previous=self.uncertain_since.get(ident)
+                if previous is None or previous[0] != signature:
+                    self.uncertain_since[ident]=(signature,time.monotonic())
+                uncertain_stable=time.monotonic()-self.uncertain_since[ident][1] >= 15
+            else:
+                self.uncertain_since.pop(ident,None)
+                uncertain_stable=False
             threshold=config.get('ahead_threshold')
             ahead=account.get('queueAhead')
             waiting=(phase=='waiting' and threshold is not None and isinstance(ahead,int)
@@ -187,7 +203,8 @@ class Notifier:
                 skey = event_key(account) + ':sold_out:' + box_id
                 candidates.append(('sold_out', skey))
             elif phase in config.get('events', ['ready', 'uncertain']):
-                candidates.append((phase, event_key(account)))
+                if phase != 'uncertain' or uncertain_stable:
+                    candidates.append((phase, uncertain_key if phase == 'uncertain' else event_key(account)))
 
             for event_type, key in candidates:
                 if event_type not in {'entry_passed', 'cloudflare'} and key in self.ledger:

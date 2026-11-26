@@ -31,10 +31,12 @@ READ_DETAIL = r'''() => {
   const alert = document.querySelector('#customAlert');
   const waiting = document.querySelector('#waitingNo');
   const exit = document.querySelector('[id$="_lbExitQueue"]');
+  const purchase = document.querySelector('[id$="_lbMoveToCartFlow"]');
+  const turnPage = visible(purchase) && /[0-9０-９]+\s*分以内にくじを引いてください/.test(document.body.innerText);
   const refresh = [...document.querySelectorAll('button, input[type="button"], a')]
     .find(e => visible(e) && (e.textContent.trim() === '在庫情報を更新' || e.value === '在庫情報を更新'));
   const alertText=visible(alert)?alert.innerText:'';
-  return {url:location.href, paymentTimeout:alertText.includes('タイムアウト') && /制限時間内に決済が完了しなかったため/.test(alertText.replace(/\s/g,'')) && alertText.includes('キャンセル'), soldOut:alertText.includes('順番待ち中のくじ箱が在庫切れ'), ready:visible(alert) && alert.textContent.includes('あなたの番です'),
+  return {url:location.href, paymentTimeout:alertText.includes('タイムアウト') && /制限時間内に決済が完了しなかったため/.test(alertText.replace(/\s/g,'')) && alertText.includes('キャンセル'), soldOut:alertText.includes('順番待ち中のくじ箱が在庫切れ'), ready:turnPage || (visible(alert) && alert.textContent.includes('あなたの番です')),
     number:visible(waiting) && /^\d+$/.test(waiting.textContent.trim()) ? Number(waiting.textContent.trim()) : null,
     text:document.body.innerText, exitVisible:visible(exit),
     refreshEnabled:!!refresh && !refresh.disabled && refresh.getAttribute('aria-disabled') !== 'true'};

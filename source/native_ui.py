@@ -14,8 +14,8 @@ from tkinter import messagebox, simpledialog, ttk
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-VERSION='1.5.30'
-UI_VERSION='1.5.34'
+VERSION='1.5.37'
+UI_VERSION='1.5.37'
 BG='#10151c'; PANEL='#18212c'; TEXT='#eef3f8'; MUTED='#a0aec0'; LIME='#d7f896'
 RED='#e05252'; GREEN='#38a169'
 # T-007: 綠／紅底按鈕的文字色。白字對比僅 3.25:1／3.82:1，低於 WCAG AA 4.5:1；
