@@ -22,7 +22,8 @@
 | T-004b | 修復 test_entry_tabs 的 CDP 替身 | 製作A | 待審（已完成，6/6 通過） | T-004 | H-017 |
 | T-004d | 處理 6 項「測試目的已失效」的測試 | 製作A | 待辦（需人類決定去留） | T-004b | H-017 |
 | T-010 | 移除 load_home 與 login_store 死程式碼 | 製作A | 待審 | T-004b | H-018 |
-| T-004c | 釐清 3 項行為差異是測試過時或程式回歸 | 製作A | 待辦（需人類確認預期行為） | T-004 | H-016 |
+| T-004c | 釐清行為差異是測試過時或程式回歸 | 製作A | 完成（三項均為測試過時） | T-004 | H-036 |
+| T-004d | 改寫 5 項過時測試 | 製作A | 待辦（需人類同意） | T-004c | H-036 |
 | T-009 | 複核並調整綠／紅按鈕文字色 | 設計B | 完成 | T-007 | H-022 |
 | T-013 | 套用 T-009 的停用配色到 native_ui.py | 製作A | 待審 | T-009 | H-022 |
 | T-014 | 將 GitHub 來源同步回 work\\kuji-manager | 製作A | 完成 | T-011 | H-023 |
@@ -694,4 +695,30 @@
   - `HANDOFF.md`（本紀錄、看板更新）
 - 需要對方做什麼：
   - 人類：補充是在哪個縮放層級檢查的；若只看過一種，另一種有空時再掃一眼即可。
+- 狀態：待審
+
+### H-036 ｜ 2026-11-26 17:15 ｜ 寄件：製作A → 收件：人類
+- 類型：回覆
+- 任務：T-004c、T-018
+- 引用：H-016、H-035
+- 內容：
+  - **T-018 補充驗收**：人類提供 v1.5.38 實機畫面，標題列顯示「suto 1 ban kuji · 獨立視窗 v1.5.38」，頂欄「關閉背景服務」「重新啟動服務」、勾選項「每 3 分鐘自動重新讀取全部籤數」、卡片「請在獨立視窗選擇商品」均為 T-006 改名後的文字，服務回報 v1.5.38 已連線。命名統一與版本單一來源在實機成立。
+  - **T-004c 三項行為差異全部釐清，結論一致：測試過時，程式正常。**
+    1. `test_official_page_reload_retries_observation_without_submission` — 設計B 於 v1.5.35～37 已修正，合併後自行通過。
+    2. `test_login_only_reuses_window_when_control_resumes` — 人類回報背景服務關閉時「只有連接 Chrome 可按，且可運作」，功能正常。
+    3. `test_gate_without_pid_adopts_product_after_entry` — **經實機確認為測試過時，非程式缺陷。** 人類首次回報「應該不會」，製作A 一度判斷為真實缺陷；後續釐清該次測試時畫面已在選籤筒頁，並非測試模擬的完整流程。人類重新以首頁起始實測，帳號B 成功自動採用商品並轉入「監看新箱」，訊息「基準 BOX-00209，等待新開滿箱」，Chrome 停在 `SelectBox.aspx?pid=sap_0000008689`。
+  - **製作A 自我檢討**：在只有單一次、且情境不明的使用者回報下，便於 H-035 之後判斷「八成是真的壞了」，過早下結論。正確作法是先確認測試情境與實測情境是否相同。已於本紀錄更正，未因該誤判修改任何程式碼。
+  - 目前 6 項未通過的測試，**全部屬於測試自身過時或環境限制，無一指向程式缺陷**：
+    | 測試 | 類別 |
+    |---|---|
+    | `test_login_only_reuses_window_when_control_resumes` | 替身過時 |
+    | `test_gate_without_pid_adopts_product_after_entry` | 替身過時 |
+    | `test_open_uses_visible_chrome_and_separate_account_profile` | 驗證 v1.5.23 已廢棄的啟動方式 |
+    | `test_query_inventory_api_parses_html_and_sets_inventory` | 使用 v1.5.22 已移除的 aiohttp 查詢 |
+    | `test_soldout_resume_runs_once_and_respects_switch` | 呼叫已更名的方法 |
+    | `test_restart_updates_existing_login_only_service_without_enabling_control` | 需 tkinter，僅能於 Windows 執行 |
+- 改動檔案：
+  - `HANDOFF.md`（本紀錄、看板更新）
+- 需要對方做什麼：
+  - 人類：是否同意改寫前 5 項（T-004d）。只動 `test_*.py`，不碰程式本體。
 - 狀態：待審
