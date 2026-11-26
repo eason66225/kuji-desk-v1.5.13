@@ -1,44 +1,47 @@
 # Kuji Desk AI 接手摘要
 
-更新：2026-11-25。先讀本檔及 AGENTS.md；舊版決策查 HANDOFF.md，操作查 使用說明.md。
+更新：2026-11-26。先讀本檔及 AGENTS.md；架構查 ARCHITECTURE.md，操作查 使用說明.md，歷史決策才讀 HANDOFF.md。
 
-## 現版與架構
+## 版本與套用狀態
 
-- 桌面 UI／分享包 v1.5.34；服務相容版本 VERSION=1.5.30。勿將這兩種版本視為不一致故障。
-- 來源入口 desktop.py；manager.py 管理本機 18766 認證 API、帳號與任務；native_ui.py 為 Tk 桌面介面；notifications.py 為獨立 DC 通知程序。
-- 依賴為 aiohttp 3.14.5、Playwright 1.65.2、BeautifulSoup 4.15.0。Windows 打包環境 Python 3.13.1、PyInstaller 6.22.3。
-- 使用者啟用 Chrome 遠端偵錯並允許連線後，用 connect_over_cdp('chrome', timeout=60000) 接管既有 Chrome；不是無頭模式，也不另外啟動專用 profile。
-- Chrome 多個真實設定檔可能只呈現一個 Playwright context。逐頁 Target.getTargetInfo 的 browserContextId 才能區分 profile；外部 context 不可關閉。
+| 範圍 | 版本／狀態 |
+| --- | --- |
+| 本機來源／最新分享 EXE | UI／服務 v1.5.37（已啟動） |
+| 目前服務 | 2026-11-26 已換為 v1.5.37，loginOnly=true |
+| 桌面 GUI | v1.5.37 已開啟，視窗標題已核對 |
+| DC 通知程序 | 已獨立替換為 v1.5.36，已確認存活與連線心跳 |
+| GitHub | 公開 main 與 Release 最新 v1.5.34；35／36 尚未同步 |
 
-## 主要機制與陷阱
+2026-11-26 使用者要求開新版本；實際發現舊服務1.5.11、所有帳號未開瀏覽器且沒有活動監看／隊伍任務，故換服務37並開新版GUI。設定與任務紀錄保留，未自動重送排隊；目前loginOnly，A/B/C closed，需本人連接Chrome再啟用控制台。重新讀帳號狀態，不依此處歷史狀態猜隊伍。
 
-- 綁定：GUI 從 Local State 的 info_cache 顯示明確名稱／目錄下拉清單，預設不選；禁止以 last_used 代替本人選取。B 曾因讀到 A 的 Default 被判定重複。
-- pick_chrome_page 掃描開啟中的 profiles，用短暫 chrome://version 頁辨識 profile_path 的目錄名稱，快取 profile ID→目錄，斷線清除。既有網站頁不導航；重複綁定拒絕。
-- 原生 profile-picker 為 browser_ui target。選既有視窗未必產生新 page；CLI 帶 nonce 開頁也不可靠，不能用其作唯一完成訊號。
-- 共用 CDP 連線以 browser_lock 串行建立；disconnected 清引用及取消任務，舊回呼不得清除新連線。GUI open 的等待涵蓋授權時間。
-- fetch_boxes 用 page.evaluate(FETCH_BOX_HTML) 發同源 fetch，credentials=include、cache=no-store、15 秒 AbortController。核對回應 URL／商品／HTTP／驗證訊號，再解析 HTML；精確比對籤數，不能用 includes。
-- 正常找箱不整頁 reload；庫存／順位從頁面 DOM／網站訊號讀取。不可宣稱官方 JSON API 或把失敗讀取當 0。
-- 五分頁只用於明確一時入場限制並受 entryRefresh 控制，各頁依 minSeconds/maxSeconds 抖動；429/503 明確冷卻共用，首個同商品成功頁接續。
-- new_entry_page 必須從原 profile 分頁 window.open 並核對 browserContextId；共享 context.new_page 會建錯 profile，Target.createTarget 指定一般 profile ID 也不支援。只清理本次助手追蹤的頁面。
-- 排隊提交一次，結果不明讀回；不自動付款、處理驗證或重送。外部 Chrome 在服務關閉後保留。
-- Cloudflare 暫停 note 為固定訊息。notifications.cloudflare_event_key 由該 note 與同訊息事件 at 產生每次驗證的鍵。
-- cloudflare_enabled 預設 true，cloudflare_popup 預設 false，存於本機 discord.json。DC 與本機提示分開勾選；提示只在 GUI 開啟時生效，非模態 Toplevel，不阻塞輪詢。
-- DC 與本機提示各自去重；本機 cloudflare-popups.json 不可打包。關閉 Cloudflare DC 通知也不應轉發成一般 uncertain 通知。
-- 「已通過入場限制」事件仍可選；作者目前僅在本機關閉。不要將 Runtime 偏好複製到來源或分享包。
+## v1.5.37 API 查詢恢復（已啟動，待本人連接Chrome）
 
-## 已驗證與待驗證
+查明接管 Chrome 後 api_wait_count 被改為回空 dict，query_inventory_api 只讀靜態 DOM。已改順位由頁內 POST SelectBoxDetail.aspx/GetLotteryBoxWaitCount，讀 d.your_waiting_no（字串或物件 d）；userId 從原頁記憶體取得，不輸出不複製 Cookie。庫存頁內 GET 當前箱頁並解析 HTML，來源標記 api。每10秒順位、每180秒庫存，手動更新庫存也查順位；查詢保留已登入分頁，不整頁刷新。30秒內最新順位優先於靜態DOM，切箱清除此優先狀態與舊庫存。失敗保留上次值，錯誤事件每類每分鐘最多一筆，驗證仍暫停。恢復查詢0籤時既有售完接續排程。
 
-已驗證：Python 語法、Windows EXE 打包、實際多 profile Chrome 連接、分頁內 fetch HTTP 200／100 箱且 timeOrigin 不變、同 profile window.open、v1.5.34 設定頁兩勾選項與儲存鈕可見、實際 Discord 測試 HTTP 200。換 GUI／通知程序時保留 v1.5.30 服務及網站任務。
+已用新 Account 方法對實站做唯讀驗證：順位10人、庫存75枚／12賞，DOM重讀不覆蓋最新順位，timeOrigin不變；更早原始接口驗證順位11人。語法檢查與v1.5.37分享打包成功。服務37已啟動；實際使用需重新連接Chrome，不能把先前唯讀測試等同本輪三帳號已接回。
 
-未驗證：其他電腦首次使用、五分頁入場通過後的完整流程、新 Cloudflare DC／彈窗的實際挑戰觸發。舊瀏覽器架構的測試契約部分過時；依使用者要求近期未跑離線測試，不得宣稱現版全套回歸通過。
+## 最近修正
 
-## 維護命令
+- v1.5.31 明確選擇 Chrome 設定檔名稱／目錄，避免 last_used 指向 A 造成 B 重複綁定。
+- v1.5.34 Cloudflare DC 與本機非模態提示分開勾選，同次驗證各提示一次；彈窗需 GUI 開啟。作者只在本機停用「通過入場限制」通知，程式選項仍保留。
+- v1.5.35 待套用：辨識倒數＋可見購入入口的 ready 頁；無退出入口時，離箱改等待網站釋放後返回同商品列表，可停止，不再直接 goto 後報讀不到箱子。完整流程未驗證。
+- v1.5.36 已套用通知程序：一般 uncertain 同箱同 note 持續15秒才通知，恢復即取消；按帳號／商品／箱號去重，跨重排沿用。repeat_enabled 仍生效；Cloudflare、ready、售完不延遲。
 
-本機開發來源使用既有 ../../Runtime/kuji-manager/venv/Scripts/python.exe；可攜來源按 README 建立 .venv。
+## 開發入口與命令
 
-- 語法：python -m py_compile manager.py native_ui.py notifications.py desktop.py build_exe.py
-- 歷史回歸入口（本輪未跑）：python -m unittest test_manager test_login_store test_notifications test_entry_tabs test_service_runtime
-- 分享打包：python build_exe.py --share
-- 請區分來源、打包版本與實際執行服務；本次 GitHub 整理不重啟任何服務或瀏覽器。
+- 來源 desktop.py；GUI native_ui.py；本機服務與 Account 流程 manager.py；DOM 解析 details.py；通知 notifications.py。完整資料流和函式見 ARCHITECTURE.md。
+- 本機使用 ../../Runtime/kuji-manager/venv/Scripts/python.exe；可攜來源依 README 建立 .venv。
+- 語法：python -m py_compile manager.py native_ui.py notifications.py details.py desktop.py build_exe.py
+- 分享打包：python build_exe.py --share，最新輸出 ../KujiDesk-share-v1.5.37/KujiDesk.exe。
+- 舊回歸入口：python -m unittest test_manager test_login_store test_notifications test_entry_tabs test_service_runtime。部分契約過時；依使用者要求近期未跑離線測試。
+- 執行中版本以已認證 Client(runtime).alive() 核對，不輸出完整 state／設定或 token。
 
-Runtime 含 Cookie、通知設定與控制台 token，只讀必要欄位。關閉／重啟會影響隊伍時先核對授權；不得分享 Runtime 或整份設定。
+## 驗證範圍
+
+已驗證：語法與 Windows 打包、既有 Chrome 多 profile 連接、頁內 fetch HTTP200／100箱且 timeOrigin 不變、同 profile window.open、v1.5.34 設定頁、Discord 實際測試 HTTP200、v1.5.36 通知程序存活且 connected=true。GitHub v1.5.34 已核對40份來源雜湊。
+
+未驗證：其他電腦首次啟動、五分頁完整入場通過、新 Cloudflare DC／彈窗的實際挑戰觸發、35倒數釋放後自動接續、36刻意觸發異常穩定／復原／跨重排去重。不得將語法檢查或打包稱為實站成功。
+
+## 下一步
+
+取得本輪重啟授權才套用服務37（包含35離箱修正）；保留本人 Chrome，重新連線後確認實際離箱接續。通知36不需等待服務重啟。GitHub若再次更新，需同步來源、文件、來源雜湊與Release，勿覆蓋根目錄原始 v1.5.13 EXE。
