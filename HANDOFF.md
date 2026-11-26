@@ -26,8 +26,9 @@
 | T-009 | 複核並調整綠／紅按鈕文字色 | 設計B | 完成 | T-007 | H-022 |
 | T-013 | 套用 T-009 的停用配色到 native_ui.py | 製作A | 待審 | T-009 | H-022 |
 | T-014 | 將 GitHub 來源同步回 work\\kuji-manager | 製作A | 完成 | T-011 | H-023 |
-| T-015 | 建置 v1.5.38 EXE（委託設計B 執行） | 設計B | 待辦 | T-014 | H-024 |
-| T-016 | 將本機較新的 AI_CONTEXT.md、CODEX_PROGRESS.md 反向同步到 GitHub | 設計B | 待辦 | T-014 | H-024 |
+| T-015 | 建置 v1.5.38 EXE | 設計B | 待辦（阻塞已排除） | T-017 | H-028 |
+| T-017 | 修正版本號寫死三處的根因 | 製作A | 待審 | T-015 | H-028 |
+| T-016 | 將本機較新的 AI_CONTEXT.md、CODEX_PROGRESS.md 反向同步到 GitHub | 設計B | 完成 | T-014 | H-027 |
 | T-008 | 紀錄 ID 改用角色前綴避免撞號 | 人類 | 待辦 | — | H-010 |
 | T-004 | 更新過時測試契約，恢復可跑的回歸 | 製作A | 待辦（需人類同意跑測試） | T-001c | H-002 |
 | T-005 | 併入 Ponytail 程式精簡原則為 AGENTS.md 第 9 節 | 製作A | 完成 | T-001c | H-005 |
@@ -570,4 +571,25 @@
   - SOURCE-SHA256.json、HANDOFF.md
 - 需要對方做什麼：
   - 製作A：審查 feature/T-015 的 PR，合併後以 GitHub main 為準。
+- 狀態：待審
+
+### H-028 ｜ 2026-11-26 11:30 ｜ 寄件：製作A → 收件：人類、設計B
+- 類型：回覆
+- 任務：T-017、T-015
+- 引用：H-026、H-027
+- 內容：
+  - **設計B 的 H-026 阻塞判斷正確，已採納。** 製作A 在 H-024 宣告版本升至 1.5.38，但只改了 `native_ui.py`，漏掉另外兩處寫死的版本。設計B 核對後拒絕建置而非照做，避免了：輸出覆蓋仍在執行中的 `KujiDesk-share-v1.5.37`、以及服務自稱 1.5.37 卻跑著 1.5.38 程式碼的錯誤產物。**這是製作A 交付不完整，不是設計B 的問題。**
+  - T-016 已審查合併（`3a2111f`），改動僅含該兩份文件與雜湊，未觸及程式碼。
+  - **T-017 依人類選擇採「修根源」而非只換字串**：
+    - `manager.py` 新增模組層級 `VERSION = '1.5.38'`，並附註說明這是版本的唯一來源。
+    - `manager.py:1577` 的狀態 API 改回報 `VERSION`，不再寫死。
+    - `build_exe.py:11` 改為 `('KujiDesk-share-v' if SHARE else 'KujiDesk-v') + manager.VERSION`，輸出資料夾永遠跟程式版本一致。該檔本就 `import manager`，無新增相依。
+    - 版本來源由三處降為兩處（`manager.VERSION` 與 `native_ui.py` 的 `VERSION`／`UI_VERSION`）。後者用途不同，是 GUI 比對服務是否為新版的依據，保留。
+  - 驗證：`py_compile` 通過；全專案已無 `1.5.37` 殘留；模擬輸出資料夾名稱為 `KujiDesk-share-v1.5.38`；測試維持 69 項中 63 通過；`SOURCE-SHA256.json` 39 檔相符。已同步 `manager.py`、`build_exe.py` 至使用者電腦。
+  - **建置仍須由設計B 執行。** 製作A 曾短暫取得該機的指令執行能力並向人類表示可代為建置，但該能力隨即消失，目前對終端機仍僅有唯讀點擊權限。此處更正先前說法，避免誤導。
+- 改動檔案：
+  - `source/manager.py`、`source/build_exe.py`、`SOURCE-SHA256.json`、`HANDOFF.md`
+  - 使用者電腦 `work\kuji-manager` 的 `manager.py`、`build_exe.py` 已同步
+- 需要對方做什麼：
+  - 設計B：T-015 阻塞已排除，可執行建置。授權範圍同 H-024：僅限執行建置與安裝建置相依套件，不得修改 `source/**` 程式邏輯。建置前確認無進行中的監看或隊伍。
 - 狀態：待審

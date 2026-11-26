@@ -48,6 +48,9 @@ from cloudflare_pause import requires_cloudflare_verification
 from service_runtime import bind_listener, remember_runtime
 
 # (Runtime path defined above)
+# 版本的唯一來源。build_exe.py 用它組出分享資料夾名稱，狀態 API 也回報這個值。
+# 升版只改這裡與 native_ui.py 的 VERSION／UI_VERSION。
+VERSION = '1.5.38'
 ORIGIN = 'https://on-line.1kuji.com'
 LIST_PATH = '/Form/Product/SelectBox.aspx'
 DETAIL_PATH = '/Form/Product/SelectBoxDetail.aspx'
@@ -1574,7 +1577,7 @@ def create_app(manager):
             discord = json.loads((manager.runtime/'discord-status.json').read_text(encoding='utf-8'))
         except (OSError, ValueError):
             discord = {'enabled':False}
-        return web.json_response({'version':'1.5.37', 'loginOnly':manager.login_only, 'accounts':[a.state() for a in manager.accounts.values()], 'notifications':discord})
+        return web.json_response({'version':VERSION, 'loginOnly':manager.login_only, 'accounts':[a.state() for a in manager.accounts.values()], 'notifications':discord})
 
     async def action(request):
         if manager.shutting_down:

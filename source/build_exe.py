@@ -8,7 +8,7 @@ import manager
 
 HERE=Path(__file__).resolve().parent
 SHARE = '--share' in sys.argv
-DIST=HERE.parent/('KujiDesk-share-v1.5.37' if SHARE else 'KujiDesk-v1.5.37')
+DIST=HERE.parent/(('KujiDesk-share-v' if SHARE else 'KujiDesk-v')+manager.VERSION)
 WORK=manager.DEFAULT_RUNTIME/'pyinstaller'
 DIST.mkdir(parents=True,exist_ok=True)
 WORK.mkdir(parents=True,exist_ok=True)
