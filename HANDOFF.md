@@ -25,6 +25,8 @@
 | T-004c | 釐清 3 項行為差異是測試過時或程式回歸 | 製作A | 待辦（需人類確認預期行為） | T-004 | H-016 |
 | T-009 | 複核並調整綠／紅按鈕文字色 | 設計B | 完成 | T-007 | H-022 |
 | T-013 | 套用 T-009 的停用配色到 native_ui.py | 製作A | 待審 | T-009 | H-022 |
+| T-014 | 將 GitHub 來源同步回 work\\kuji-manager | 製作A | 完成 | T-011 | H-023 |
+| T-015 | 建置含今日改動的 EXE | 人類 | 待辦 | T-014 | H-023 |
 | T-008 | 紀錄 ID 改用角色前綴避免撞號 | 人類 | 待辦 | — | H-010 |
 | T-004 | 更新過時測試契約，恢復可跑的回歸 | 製作A | 待辦（需人類同意跑測試） | T-001c | H-002 |
 | T-005 | 併入 Ponytail 程式精簡原則為 AGENTS.md 第 9 節 | 製作A | 完成 | T-001c | H-005 |
@@ -492,3 +494,22 @@
 - 需要對方做什麼：
   - 人類：在 Windows 實機目視驗收上述四項。
 - 狀態：待審
+
+### H-023 ｜ 2026-11-26 11:10 ｜ 寄件：製作A → 收件：人類、設計B
+- 類型：交付
+- 任務：T-014
+- 引用：H-019
+- 內容：
+  - 人類核准，已透過檔案橋接把 GitHub `source/` 的 13 個檔案寫回 `Documents\Codex\PrintLab\work\kuji-manager`，兩邊來源自此一致。該機未安裝 git，故以直接寫檔取代 `git pull`。
+  - 寫入：`manager.py`、`native_ui.py`、`notifications.py`、`details.py`、`build_exe.py`、四個 `test_*.py`、`AGENTS.md`、`README.md`、`ARCHITECTURE.md`、`使用說明.md`。
+  - **刻意未覆蓋 `AI_CONTEXT.md` 與 `CODEX_PROGRESS.md`**：設計B 今早（10:06）才更新過，本機版本比 repo 新。覆蓋會抹掉它最新的進度與驗證紀錄。這兩份應改為從本機往 GitHub 更新，開 T-016 追蹤。
+  - **`login_store.py` 與 `test_login_store.py` 仍留在該目錄**：本 session 沒有在該機刪檔的能力。兩者已無任何 import，PyInstaller 以進入點追蹤相依，不會打包進 EXE，因此留著無害。人類可自行刪除。
+  - 未觸碰：`KujiDesk.exe`、`KujiDesk.runtime.json`、Runtime 目錄、`.bak` 備份、`web/`、`browser-box-scan/`、PrintLab 父倉庫的任何其他內容。未執行任何程式，未重啟服務，未操作瀏覽器或隊伍。
+  - **尚未建置**：PyInstaller 需在 Windows 執行，製作A 在 Linux 容器無法跨平台產生 Windows 執行檔；且終端機於本 session 為唯讀點擊權限，無法代為輸入指令。建置指令須由人類執行（T-015）。
+- 改動檔案：
+  - 使用者電腦 `work\kuji-manager` 的 13 個檔案（repo 本身未變動）
+  - `HANDOFF.md`（本紀錄、看板更新）
+- 需要對方做什麼：
+  - 人類：執行建置，產生含今日改動的 EXE。建置前請確認目前沒有正在進行的監看或隊伍。
+  - 人類：建置後新 EXE 會輸出為版本化資料夾，不會覆蓋執行中的舊檔。
+- 狀態：完成
