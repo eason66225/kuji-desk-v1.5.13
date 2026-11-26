@@ -1,7 +1,7 @@
 {
   "AGENTS.md": "2fff3f52d0b43357b38d5dce2e36dd2f19361c5b857e336c1e92f791f6f750a3",
   "ARCHITECTURE.md": "7a4da375bb8e1b50d9d4eb27f1182b58d0729a487f55df508e527bfe2b06cbbf",
-  "AI_CONTEXT.md": "bbd21cc51ee20309b904bb155f2046047c2fdc89397fab8c21fa187b64a20595",
+  "AI_CONTEXT.md": "3625225c20196d8533ad63f205aead862ca99cddb7cffec8c67b63e4ea3c2bac",
   "browser-box-scan/manifest.json": "68d554cda27c89d75fdd64150e50bf854cb12aed570be4f6ced07ebca946799a",
   "browser-box-scan/popup.html": "3e739e033733b47b6840f1469318f50311b50eaeba9e43303957c59d403d4341",
   "browser-box-scan/popup.js": "d714891bd2de684ddd3515c20bcb1bfe3454620a4a95fe74be6ba493435a1d7b",
@@ -9,7 +9,7 @@
   "browser-box-scan/worker.js": "8898ef62990336a56e747bf1688545d2e934855b22ac0c6c75e4663aeda5cbd4",
   "build_exe.py": "db37bb011fb1d2f7b832408002801fa6ee099c075c0dc75feffa6861e92aa78a",
   "cloudflare_pause.py": "aa5e67bf3f2b76652fc3c18adb1f1f379bc1b5fac0a9330f71878f65a8b5b830",
-  "CODEX_PROGRESS.md": "b54fb1965e1eb9de9310644d9cc5303c27c9e9c7bc5f563459803e50d2ec55dc",
+  "CODEX_PROGRESS.md": "c6f009a6da1918d410cb83eff143571ba9560672a2fbd37645da8e7a54b7c762",
   "desktop.py": "32aec97ddd9bfc07a3b32187c7b91d3b4c1ed49be079d27f2c255c3effffe788",
   "details.py": "4f0e58116e18e2cb7e403d108bc973b75f91dc694de13203fdf5e21abf8b1902",
   "HANDOFF.md": "ba56d0a24d528d134d123d7a7d49ec198ad348d4fa7f7ed433186be18cfe94ec",
